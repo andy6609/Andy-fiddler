@@ -11,6 +11,7 @@ import hashlib
 import http.server
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -30,9 +31,20 @@ def check(cond, label):
         failures.append(label)
 
 
+LAB_PORTS = {"v1_flow_recorder": 18081, "v2_tls_recorder": 18082, "v3_h2_observer": 18083}
+
+
 def start(name, *args, env=None):
     proc = subprocess.Popen([f"{BUILD}/lab/{name}", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-    time.sleep(0.5)
+    port = LAB_PORTS.get(name)
+    for _ in range(100):  # key generation can take a moment; wait until the listener is up
+        if port is None:
+            break
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
     return proc
 
 
@@ -150,7 +162,54 @@ def v2(tmp, h1):
     check(any("client TLS handshake failed" in t["error"] for t in tunnels), "untrusted-CA handshake failure recorded")
 
 
-VERSIONS = [("v1", v1), ("v2", v2)]
+def h2_server(tmp, files):
+    """nghttpd serving `files` (name -> bytes) over TLS with a response trailer."""
+    if not os.path.exists(f"{tmp}/server.pem"):
+        it.make_certs(tmp)
+    docs = f"{tmp}/h2docs"
+    os.makedirs(docs, exist_ok=True)
+    for name, data in files.items():
+        with open(f"{docs}/{name}", "wb") as f:
+            f.write(data)
+    port = it.free_port()
+    proc = subprocess.Popen([it.NGHTTPD, "--address=127.0.0.1", f"--htdocs={docs}", "--trailer=x-h2-trailer: yes", str(port),
+                             f"{tmp}/server.key", f"{tmp}/server.pem"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.3)
+    return port, proc
+
+
+H2_FILES = {f"f{i}.json": json.dumps({"file": i, "pad": "x" * (3000 * i)}).encode() for i in range(3)}
+
+
+def v3(tmp, h1):
+    print("v3_h2_observer")
+    port, ng = h2_server(tmp, H2_FILES)
+    out = f"{tmp}/v3.jsonl"
+    proc = start("v3_h2_observer", out, env=dict(os.environ, SSL_CERT_FILE=f"{tmp}/up-ca.pem"))
+    try:
+        urls = [f"https://localhost:{port}/{n}" for n in H2_FILES]
+        rc, body, err = it.curl("--http2", "--cacert", out + ".ca.pem", "-Z", "--parallel-max", "3", *urls, proxy=18083)
+        check(rc == 0 and body.count(b'"file"') == 3, f"3 parallel h2 requests relayed byte-for-byte {err.strip()}")
+        time.sleep(0.5)
+    finally:
+        log = stop(proc)
+        ng.terminate()
+    conns = read_flows(out)
+    check(len(conns) == 1 and conns[0]["alpn"] == "h2", "one h2 connection recorded")
+    if conns:
+        c = conns[0]
+        types = {(f["dir"], f["type"]) for f in c["frames"]}
+        check({("C->S", "SETTINGS"), ("S->C", "SETTINGS"), ("C->S", "HEADERS"), ("S->C", "DATA")} <= types, "SETTINGS/HEADERS/DATA frames seen both ways")
+        ids = sorted(s["stream"] for s in c["streams"])
+        check(ids == [1, 3, 5], f"client streams are odd: {ids}")
+        sizes = sorted(s["dataServerToClient"] for s in c["streams"])
+        check(sizes == sorted(len(v) for v in H2_FILES.values()), "DATA bytes per stream == file sizes")
+        check(any(f["type"] == "SETTINGS" and "settings" in f for f in c["frames"]), "SETTINGS parameters decoded")
+    check("END_STREAM" in log, "frame log printed")
+    return conns
+
+
+VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3)]
 
 
 def main():
