@@ -1,0 +1,8 @@
+/build*/
+/data/
+*.wscope
+*.pcap
+*.pcapng
+*.pem
+/.cache/
+__pycache__/
