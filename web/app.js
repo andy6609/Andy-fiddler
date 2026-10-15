@@ -143,7 +143,7 @@
 
   const S = {
     token: '', version: '', uiPort: 0, connected: true,
-    revision: 0, session: {}, flows: [], packets: [], stats: {}, capture: {}, proxy: {},
+    revision: 0, session: {}, flows: [], packets: [], stats: {}, capture: {}, proxy: {}, systemProxy: {},
     flowById: new Map(), packetById: new Map(),
     interfaces: null,
     view: 'flows',                       // 'flows' | 'packets'
@@ -300,6 +300,7 @@
     }
     if (snap.capture) S.capture = snap.capture;
     if (snap.proxy) S.proxy = snap.proxy;
+    if (snap.systemProxy) S.systemProxy = snap.systemProxy;
     return !snap.unchanged;
   }
 
@@ -405,6 +406,8 @@
       <label class="small" title="Terminate TLS with the local CA so HTTPS requests are recorded in plaintext. Off: CONNECT tunnels are relayed as encrypted bytes.">
         <input type="checkbox" id="proxyMitm" checked> Decrypt HTTPS</label>
       <button id="proxyToggle" data-action="proxy-toggle" class="primary">Start proxy</button>
+      <button id="sysProxyToggle" data-action="sysproxy-toggle" class="hidden"
+        title="Windows: point the current user's system proxy (WinINET) at WireScope. The previous setting is saved first and restored when you turn this off, stop the proxy or exit. Browsers and apps that read the system setting follow it; curl and Node.js CLIs do not.">Use as system proxy</button>
       <div class="divider"></div>
       <span class="status-dot" id="captureDot"></span><b>Capture</b>
       <select id="captureDevice" aria-label="Capture interface"><option value="">Loading interfaces…</option></select>
@@ -429,6 +432,11 @@
     pt.classList.toggle('primary', !p.running);
     $('#proxyPort').disabled = $('#proxyMitm').disabled = Boolean(p.running);
     if (p.running) { $('#proxyPort').value = p.port; $('#proxyMitm').checked = Boolean(p.mitm); }
+    const sp = S.systemProxy || {}, st = $('#sysProxyToggle');
+    st.classList.toggle('hidden', !sp.supported);
+    st.textContent = sp.ownedByWireScope ? 'System proxy: on' : 'Use as system proxy';
+    st.classList.toggle('primary', Boolean(sp.ownedByWireScope));
+    st.disabled = !sp.ownedByWireScope && !p.running;
     const ct = $('#captureToggle');
     ct.textContent = c.running ? 'Stop capture' : 'Start capture';
     ct.disabled = !c.running && c.available === false;
@@ -436,6 +444,8 @@
     const parts = [];
     if (!S.connected) parts.push('<span class="status error">engine unreachable</span>');
     if (p.running) parts.push(`proxy 127.0.0.1:${esc(p.port)} · ${esc(p.connections)} open · ${p.mitm ? 'TLS terminated' : 'TLS passthrough'}`);
+    if (sp.ownedByWireScope) parts.push(`system proxy → ${esc(sp.current?.server)}`);
+    if (sp.leftover) parts.push(`<span class="status error">system proxy still set by an earlier run (${esc(sp.current?.server || '?')}; saved original in ${esc(sp.backupPath)})</span> <button class="small" data-action="sysproxy-restore">Restore original</button>`);
     if (c.running) parts.push(`capture ${esc(deviceName(c.device))} · ${esc(c.received)} received · ${esc(c.dropped)} dropped by driver`);
     if (p.error) parts.push(`<span class="status error">proxy: ${esc(p.error)}</span>`);
     if (c.error) parts.push(`<span class="status error">capture: ${esc(c.error)}</span>`);
@@ -1525,7 +1535,7 @@
       <p>Adds the CA to the current user's Trusted Root store so browsers and most Windows apps accept the proxy's certificates. Remove it when you are done.</p>
       <div style="display:flex;gap:8px"><button data-action="ca-trust" data-install="1" ${ca.exists ? '' : 'disabled'}>Install for current user</button><button class="danger" data-action="ca-trust" data-install="0" ${ca.exists ? '' : 'disabled'}>Remove</button></div>
       <h3>Client setup</h3>
-      <p>WireScope does not change system proxy settings. Point each client at the proxy explicitly. Clients that ignore proxy settings or pin certificates will not show up here.</p>
+      <p>WireScope changes the Windows system proxy only when you press <b>Use as system proxy</b>, and restores the saved setting when you turn it off, stop the proxy or exit. Browsers and apps that read the system setting follow it; curl and Node.js-based CLIs do not, so point those at the proxy with the variables below. Clients that pin certificates will fail the TLS handshake instead of showing up in plaintext.</p>
       <pre class="code">${esc(setup)}</pre>`);
     S.ca = ca;
   }
@@ -1648,6 +1658,17 @@
       await refreshNow();
     },
     'proxy-toggle': proxyToggle,
+    'sysproxy-toggle': async () => {
+      const on = !S.systemProxy.ownedByWireScope;
+      S.systemProxy = await api('POST', '/api/sysproxy', { enable: on });
+      toast(on ? `System proxy → ${S.systemProxy.current?.server}` : 'System proxy restored');
+      updateToolbar();
+    },
+    'sysproxy-restore': async () => {
+      S.systemProxy = await api('POST', '/api/sysproxy', { enable: false });
+      toast('System proxy restored from the saved backup');
+      updateToolbar();
+    },
     'capture-toggle': captureToggle,
     session: sessionDialog,
     'session-save': async () => {
@@ -1691,7 +1712,7 @@
     'cmp-sort': (el) => { S.cmp.sortKeys = el.checked; $('#cmpContent').innerHTML = compareContent(); },
     'cmp-same': (el) => { S.cmp.showSame = el.checked; $('#cmpContent').innerHTML = compareContent(); },
   };
-  const LIVE_ONLY = new Set(['proxy-toggle', 'capture-toggle', 'session-save', 'session-new', 'sample', 'import', 'export',
+  const LIVE_ONLY = new Set(['proxy-toggle', 'sysproxy-toggle', 'sysproxy-restore', 'capture-toggle', 'session-save', 'session-new', 'sample', 'import', 'export',
     'export-session', 'export-pcap', 'export-report', 'ca', 'ca-create', 'ca-download', 'ca-trust', 'notes-save']);
 
   // ---------------------------------------------------------------------------
