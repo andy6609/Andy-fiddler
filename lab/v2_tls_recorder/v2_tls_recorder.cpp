@@ -692,9 +692,14 @@ static void handleConnect(sock_t client, Reader& cr, Flow& flow, const std::stri
     //   (러너의 curl 8.23 / LibreSSL 4.3 로 CA 없이 접속: SSL_accept 는 성공했고 오류는 아무것도 기록되지 않았다)
     //   그러면 위의 handshake 실패 경로를 안 타고, 요청 없이 끊긴 '정상' 터널처럼 보인다.
     //   -> 요청을 기다리기 전에 SSL_peek 로 한 바이트 엿봐서, 실패하면 그 이유(OpenSSL 에러)를 남긴다.
+    //   (러너에서 실제로 본 것: alert 없이 끊김. 그래서 alert / 소켓 리셋 / 그냥 닫힘 을 나눠 사실대로 적는다)
     char firstByte = 0;
-    if (SSL_peek(cs, &firstByte, 1) <= 0) {
-        flow.error = ERR_peek_error() ? "client ended TLS right after the handshake: " + tlsError() : "client closed TLS before sending a request";
+    int peeked = SSL_peek(cs, &firstByte, 1);
+    if (peeked <= 0) {
+        int why = SSL_get_error(cs, peeked);
+        if (ERR_peek_error()) flow.error = "client ended TLS right after the handshake: " + tlsError();
+        else if (why == SSL_ERROR_SYSCALL && peeked < 0) flow.error = "client ended TLS right after the handshake: " + lab::lastSocketError() + " (no TLS alert)";
+        else flow.error = "client closed the connection right after the handshake, before any request (no TLS alert)";
         saveFlow(flow);
         SSL_free(cs);
         lab::closeSock(up);

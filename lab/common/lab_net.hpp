@@ -42,6 +42,7 @@
   static const sock_t BAD_SOCK = -1;
 #endif
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -114,6 +115,19 @@ inline bool sendAll(sock_t s, const char* data, size_t n) {
     return true;
 }
 inline bool sendAll(sock_t s, const std::string& data) { return sendAll(s, data.data(), data.size()); }
+
+// 마지막 소켓 호출이 실패한 OS 이유. 리셋(RST)은 어떤 TLS 클라이언트가 인증서를 거부하는 방식이기도 하다.
+inline std::string lastSocketError() {
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    if (e == WSAECONNRESET) return "connection reset by peer (WSAECONNRESET 10054)";
+    if (e == WSAECONNABORTED) return "connection aborted (WSAECONNABORTED 10053)";
+#else
+    int e = errno;
+    if (e == ECONNRESET) return "connection reset by peer (ECONNRESET)";
+#endif
+    return "socket error " + std::to_string(e);
+}
 
 // 127.0.0.1 에만 listen. (0.0.0.0 으로 열면 같은 네트워크의 남이 내 프록시를 쓸 수 있다)
 inline sock_t listenLocal(uint16_t port) {
