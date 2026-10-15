@@ -6,11 +6,13 @@
 #include <winsock2.h>
 #include <windows.h>
 // The public libpcap ABI used by Npcap; no driver code or SDK is redistributed.
+// Checked against Npcap SDK 1.16 Include/pcap/pcap.h (pcap_if, pcap_pkthdr, bpf_program, pcap_stat).
 struct pcap; using pcap_t=pcap;
 struct pcap_if { pcap_if* next; char* name; char* description; void* addresses; unsigned flags; }; using pcap_if_t=pcap_if;
 struct pcap_pkthdr { timeval ts; unsigned caplen; unsigned len; };
 struct bpf_program { unsigned bf_len; void* bf_insns; };
-struct pcap_stat { unsigned ps_recv,ps_drop,ps_ifdrop; };
+// On _WIN32 the SDK header adds ps_capt/ps_sent/ps_netdrop; declaring all six keeps the struct the size Npcap expects.
+struct pcap_stat { unsigned ps_recv,ps_drop,ps_ifdrop,ps_capt,ps_sent,ps_netdrop; };
 #else
 #include <pcap/pcap.h>
 #endif
@@ -35,7 +37,8 @@ struct Capture::Impl {
         std::wstring path=std::wstring(system)+L"\\Npcap\\wpcap.dll";
         library=LoadLibraryExW(path.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
         if(!library){error="Npcap is not installed. Install Npcap with loopback support, then restart WireScope.";return;}
-#define LOAD(member,name) member=reinterpret_cast<decltype(member)>(GetProcAddress(library,name)); if(!member){error="Npcap API unavailable: " name;return;}
+// FARPROC -> void(*)() -> real signature: the generic function-pointer hop avoids -Wcast-function-type noise.
+#define LOAD(member,name) member=reinterpret_cast<decltype(member)>(reinterpret_cast<void(*)()>(GetProcAddress(library,name))); if(!member){error="Npcap API unavailable: " name;return;}
 #else
 #define LOAD(member,name) member=&name
 #endif
