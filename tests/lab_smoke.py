@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -220,7 +221,75 @@ def v3(tmp, h1):
     return conns
 
 
-VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3)]
+def pcapng(packets):
+    """packets: list of (linktype, bytes, time_us). One IDB per link type, default microsecond resolution."""
+    def block(t, body):
+        body += b"\0" * (-len(body) % 4)
+        return struct.pack("<II", t, len(body) + 12) + body + struct.pack("<I", len(body) + 12)
+    out = block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
+    ifs = {}
+    for link, data, ts in packets:
+        if link not in ifs:
+            ifs[link] = len(ifs)
+            out += block(1, struct.pack("<HHI", link, 0, 65535))
+        out += block(6, struct.pack("<IIIII", ifs[link], ts >> 32, ts & 0xffffffff, len(data), len(data)) + data)
+    return out
+
+
+def udp_dns(name_bytes, ipv6=False, vlan=False):
+    dns = struct.pack("!HHHHHH", 7, 0x0100, 1, 0, 0, 0) + name_bytes + b"\x00\x01\x00\x01"
+    udp = struct.pack("!HHHH", 5353, 53, 8 + len(dns), 0) + dns
+    if ipv6:
+        ip = struct.pack("!IHBB", 0x60000000, len(udp), 17, 64) + bytes(15) + b"\x01" + bytes(15) + b"\x02"
+        eth = b"\x02" * 12 + b"\x86\xdd"
+    else:
+        ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 1, 0, 64, 17, 0, bytes([10, 0, 0, 1]), bytes([10, 0, 0, 2]))
+        eth = b"\x02" * 12 + (b"\x81\x00\x00\x2a\x08\x00" if vlan else b"\x08\x00")
+    return eth + ip + udp
+
+
+def run(name, *args):
+    r = subprocess.run([f"{BUILD}/lab/{name}", *args], capture_output=True, env=dict(os.environ, NO_COLOR="1"))
+    return r.returncode, r.stdout.decode(errors="replace")
+
+
+def v4(tmp, h1):
+    print("v4_packet_decoder")
+    classic = f"{tmp}/syn.pcap"
+    with open(classic, "wb") as f:
+        f.write(it.synthetic_pcap())
+    rc, out = run("v4_packet_decoder", classic)
+    check(rc == 0 and "GET /a HTTP/1.1" in out and "query example.com" in out and "[SYN]" in out, "classic pcap list: SYN, HTTP request line, DNS name")
+    rc, out = run("v4_packet_decoder", classic, "2", "--field", "TCP flags")
+    row = [l for l in out.splitlines() if l.startswith("TCP flags") or " TCP flags " in l]
+    check(row and row[0].split()[-2:] == ["47", "1"], "TCP flags field at offset 47, length 1")
+    marks = [l for l in out.splitlines() if "^^" in l]
+    check(len(marks) == 1 and marks[0].index("^^") == 8 + 15 * 3, "^^ marker under byte 47 (row 0x20, column 15)")
+
+    loop = b"\xc0\x0c"  # compression pointer to itself
+    lo = struct.pack("<I", 2) + udp_dns(b"\x01a\x00")[14:]  # BSD loopback: 4-byte AF header then IPv4
+    ng = f"{tmp}/mix.pcapng"
+    with open(ng, "wb") as f:
+        f.write(pcapng([(1, udp_dns(b"\x03www\x07example\x03com\x00", ipv6=True), 1_700_000_000_000_000),
+                        (1, udp_dns(b"\x04vlan\x00", vlan=True), 1_700_000_000_500_000),
+                        (0, lo, 1_700_000_001_000_000),
+                        (1, udp_dns(loop), 1_700_000_002_000_000)]))
+    rc, out = run("v4_packet_decoder", ng)
+    lines = out.splitlines()[1:]
+    check(rc == 0 and len(lines) == 4, "pcapng: 4 packets across two interfaces")
+    check("query www.example.com" in lines[0] and "[0:0:0:0:0:0:0:1]:5353" in lines[0], "IPv6 + DNS decoded, [addr]:port")
+    check("query vlan" in lines[1], "VLAN tag skipped")
+    check("query a" in lines[2], "BSD loopback link type decoded")
+    check("!!" in lines[3] and "DNS" in lines[3], "DNS pointer loop reported, not followed forever")
+    rc, out = run("v4_packet_decoder", ng, "2")
+    check("VLAN id" in out and "42" in out, "VLAN id field shown")
+    with open(f"{tmp}/cut.pcap", "wb") as f:
+        f.write(it.synthetic_pcap()[:-5])
+    rc, out = run("v4_packet_decoder", f"{tmp}/cut.pcap")
+    check(rc == 1 and "잘림" in out, "truncated file rejected with a reason")
+
+
+VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4)]
 
 
 def main():
