@@ -42,7 +42,7 @@ ctest --test-dir build --output-on-failure   # 단위 테스트 + 프록시 end-
 | Windows 빌드, Npcap 실제 캡처, Windows 인증서 저장소 신뢰 설치 | **미검증** |
 | 실제 AI 서비스·코딩 에이전트 트래픽 관찰 | **미수행** |
 
-자세한 맥락, 설계, 남은 작업은 [AI 인수인계 문서](docs/AI-HANDOFF.md)에, 참고한 오픈소스와 실제 의존성의 구분은 [OPEN-SOURCE-REFERENCES](docs/OPEN-SOURCE-REFERENCES.md)에 있습니다.
+관찰 가능한 범위와 한계는 [관찰 범위 보고서](docs/COVERAGE.md)에, 자세한 맥락, 설계, 남은 작업은 [AI 인수인계 문서](docs/AI-HANDOFF.md)에, 참고한 오픈소스와 실제 의존성의 구분은 [OPEN-SOURCE-REFERENCES](docs/OPEN-SOURCE-REFERENCES.md)에 있습니다.
 
 ## lab/ — 개념별 학습 버전
 
