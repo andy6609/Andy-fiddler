@@ -202,7 +202,11 @@ static void follow(const std::string& path, Store& store, std::atomic<bool>& run
 
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    setvbuf(stdout, nullptr, _IONBF, 0);   // MSVC: _IOLBF 없음 + 크기 0 이면 즉시 종료 (lab_net.hpp 의 lineBufferedStdout 참고)
+#else
     setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
     if (argc < 2) {
         printf("사용법: %s flows.jsonl   (v1/v2/v3 가 기록하는 파일)\n", argv[0]);
         return 1;

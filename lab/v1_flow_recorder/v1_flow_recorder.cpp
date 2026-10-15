@@ -414,7 +414,7 @@ static void handleClient(sock_t client) {
 
 
 int main(int argc, char** argv) {
-    setvbuf(stdout, nullptr, _IOLBF, 0);   // 파일/파이프로 보낼 때도 줄 단위로 바로 출력
+    lab::lineBufferedStdout();             // 파일/파이프로 보낼 때도 줄 단위로 바로 출력 (Windows 함정은 lab_net.hpp)
     if (argc > 1) g_outPath = argv[1];     // 기록 파일 경로 (기본 ./flows.jsonl)
     lab::netInit();
     sock_t listener = lab::listenLocal(LISTEN_PORT);

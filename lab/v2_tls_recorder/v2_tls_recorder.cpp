@@ -737,7 +737,7 @@ static void handleClient(sock_t client) {
 
 
 int main(int argc, char** argv) {
-    setvbuf(stdout, nullptr, _IOLBF, 0);
+    lab::lineBufferedStdout();
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--mitm") g_mitm = true;

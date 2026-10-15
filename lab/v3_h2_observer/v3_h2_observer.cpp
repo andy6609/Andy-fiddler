@@ -576,7 +576,7 @@ static void handleClient(sock_t client) {
 
 
 int main(int argc, char** argv) {
-    setvbuf(stdout, nullptr, _IOLBF, 0);
+    lab::lineBufferedStdout();
     if (argc > 1) g_outPath = argv[1];
     lab::netInit();
     std::string caPath = g_outPath + ".ca.pem";
