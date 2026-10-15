@@ -12,15 +12,22 @@
 #endif
 using namespace ws;
 namespace {
-std::atomic<bool> quit{false};
+std::atomic<bool> quit{false},cleaned{false};
 void onSignal(int){quit=true;}
-std::string readFile(const std::filesystem::path& p){std::ifstream f(p,std::ios::binary);if(!f)throw std::runtime_error("Missing asset: "+p.string());return {(std::istreambuf_iterator<char>(f)),{}};}
+#ifdef _WIN32
+// Closing the console window, logoff and shutdown end the process soon after this handler returns.
+// Hold it (up to ~5 s, the system limit) until main() has stopped the proxy and capture.
+BOOL WINAPI onConsole(DWORD type){quit=true;if(type==CTRL_CLOSE_EVENT||type==CTRL_LOGOFF_EVENT||type==CTRL_SHUTDOWN_EVENT)for(int i=0;i<45&&!cleaned;++i)Sleep(100);return TRUE;}
+#endif
+std::string utf8(const std::filesystem::path& p){auto u=p.u8string();return std::string(u.begin(),u.end());}
+std::string readFile(const std::filesystem::path& p){std::ifstream f(p,std::ios::binary);if(!f)throw std::runtime_error("Missing asset: "+utf8(p));return {(std::istreambuf_iterator<char>(f)),{}};}
 void output(httplib::Response& r,const json& j){r.set_content(safeJson(j),"application/json; charset=utf-8");}
 uint64_t idOf(const httplib::Request& r){return std::stoull(r.matches[1].str());}
 }
 int main(int argc,char** argv){try{
 #ifdef _WIN32
     WSADATA winsock{};if(WSAStartup(MAKEWORD(2,2),&winsock))throw std::runtime_error("Winsock initialization failed");
+    SetConsoleOutputCP(CP_UTF8);SetConsoleCtrlHandler(onConsole,TRUE);
 #else
     std::signal(SIGPIPE,SIG_IGN);
 #endif
@@ -32,7 +39,13 @@ int main(int argc,char** argv){try{
 #else
     web=(std::filesystem::absolute(argv[0]).parent_path()/"web").string();
 #endif
-    for(int i=1;i<argc;++i){std::string arg=argv[i];if(arg=="--port"&&i+1<argc)port=std::stoi(argv[++i]);else if(arg=="--data"&&i+1<argc)data=argv[++i];else if(arg=="--web"&&i+1<argc)web=argv[++i];else if(arg=="--no-open")open=false;else if(arg=="--sample")demo=true;else if(arg=="--help"){std::cout<<"WireScope [--port 17890] [--data DIR] [--web DIR] [--no-open] [--sample]\n";return 0;}else throw std::runtime_error("Unknown argument: "+arg);}
+    std::vector<std::string> args(argv,argv+argc);
+#ifdef _WIN32
+    // argv is in the ANSI code page (CP949 on Korean Windows), so --data C:\Users\<Korean name>\... arrives mangled. Re-read the UTF-16 command line.
+    {int n=0;LPWSTR* wide=CommandLineToArgvW(GetCommandLineW(),&n);if(wide){args.clear();for(int i=0;i<n;++i)args.push_back(utf8(std::filesystem::path(wide[i])));LocalFree(wide);}}
+#endif
+    const int argCount=int(args.size());
+    for(int i=1;i<argCount;++i){const std::string& arg=args[i];if(arg=="--port"&&i+1<argCount)port=std::stoi(args[++i]);else if(arg=="--data"&&i+1<argCount)data=args[++i];else if(arg=="--web"&&i+1<argCount)web=args[++i];else if(arg=="--no-open")open=false;else if(arg=="--sample")demo=true;else if(arg=="--help"){std::cout<<"WireScope [--port 17890] [--data DIR] [--web DIR] [--no-open] [--sample]\n";return 0;}else throw std::runtime_error("Unknown argument: "+arg);}
     if(port<1024||port>65535)throw std::runtime_error("UI port must be 1024–65535");
     auto webPath=utf8Path(web);const auto index=readFile(webPath/"index.html"),css=readFile(webPath/"app.css"),script=readFile(webPath/"app.js");
     Store store;Tls tls(data);Proxy proxy(store,tls);Capture capture(store);std::mutex controls;
@@ -77,5 +90,5 @@ int main(int argc,char** argv){try{
 #else
     (void)open;
 #endif
-    std::thread stopper([&]{while(!quit)std::this_thread::sleep_for(std::chrono::milliseconds(100));server.stop();});server.listen_after_bind();quit=true;stopper.join();capture.stop();proxy.stop();return 0;
+    std::thread stopper([&]{while(!quit)std::this_thread::sleep_for(std::chrono::milliseconds(100));server.stop();});server.listen_after_bind();quit=true;stopper.join();capture.stop();proxy.stop();cleaned=true;return 0;
 }catch(const std::exception& e){std::cerr<<"WireScope: "<<e.what()<<"\n";return 1;}}
