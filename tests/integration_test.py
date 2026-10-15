@@ -7,6 +7,8 @@ It does not cover Npcap or Windows trust-store behaviour.
     python3 tests/integration_test.py [path/to/build]
 """
 import base64
+import sys
+sys.dont_write_bytecode = True  # lab_smoke.py imports this file; keep tests/ free of __pycache__
 import gzip
 import hashlib
 import http.server
