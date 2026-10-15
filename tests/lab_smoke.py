@@ -17,6 +17,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import integration_test as it  # reuse the test HTTP handler, cert helper and curl wrapper
@@ -372,7 +374,60 @@ def v6(tmp, h1):
     check(rc == 3 and "필터 문법 오류" in out, "bad filter rejected")
 
 
-VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6)]
+def http_get(path, headers=None):
+    req = urllib.request.Request(f"http://127.0.0.1:18087{path}", headers=headers or {})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+
+
+def v7(tmp, h1):
+    print("v7_inspector_api")
+    src = f"{tmp}/v7.jsonl"
+    open(src, "w").close()
+    proc = start("v7_inspector_api", src)
+    try:
+        for _ in range(50):
+            try:
+                http_get("/api/bootstrap")
+                break
+            except OSError:
+                time.sleep(0.1)
+        code, body, _ = http_get("/api/bootstrap")
+        token = json.loads(body)["token"]
+        check(code == 200 and len(token) == 32, "bootstrap hands out a token")
+        T = {"X-Lab-Token": token}
+        check(http_get("/api/state")[0] == 403, "no token -> 403")
+        check(http_get("/api/state", {**T, "Host": "evil.example:18087"})[0] == 403, "foreign Host (DNS rebinding) -> 403")
+        check(http_get("/api/state", {**T, "Origin": "http://evil.example"})[0] == 403, "foreign Origin -> 403")
+        code, body, hdr = http_get("/")
+        check(code == 200 and b"/app.js" in body and "default-src 'self'" in hdr.get("Content-Security-Policy", ""), "page served with CSP")
+        # feed it what v1 writes, plus a half-written line
+        with open(f"{tmp}/v1.jsonl") as f:
+            v1lines = f.read()
+        with open(src, "a") as f:
+            f.write(v1lines + '{"half": ')
+        time.sleep(0.8)
+        state = json.loads(http_get("/api/state?revision=0", T)[1])
+        n = len(v1lines.strip().splitlines())
+        check(len(state["records"]) == n, f"follows the JSONL file ({n} complete lines, half line waits)")
+        check(all("base64" not in r.get("response", {}) for r in state["records"]), "list carries summaries without bodies")
+        check(json.loads(http_get(f"/api/state?revision={state['revision']}", T)[1]).get("unchanged") is True, "same revision -> unchanged")
+        echo = next(r for r in state["records"] if r.get("path") == "/echo")
+        detail = json.loads(http_get(f"/api/flows/{echo['_id']}", T)[1])
+        check(detail["request"]["base64"], "detail includes the body")
+        with open(src, "a") as f:
+            f.write('"done"}\n')
+        time.sleep(0.8)
+        check(json.loads(http_get(f"/api/state?revision={state['revision']}", T)[1])["revision"] == state["revision"] + 1, "completed line bumps revision")
+    finally:
+        stop(proc)
+    return src
+
+
+VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7)]
 
 
 def main():
