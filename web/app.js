@@ -149,6 +149,7 @@
     view: 'flows',                       // 'flows' | 'packets'
     category: 'all',
     connection: '',                      // flow.connection or packet.key filter
+    processPid: null,                    // Windows: flow.process.pid filter
     search: { flows: '', packets: '' },
     stateFilter: '',
     visibleIds: [],
@@ -345,7 +346,7 @@
 
   function resetSelection() {
     S.selected = null; S.detail = null; S.detailKey = '';
-    S.compare = []; S.backTo = null; S.connection = ''; S.highlight = null; S.stream = null;
+    S.compare = []; S.backTo = null; S.connection = ''; S.processPid = null; S.highlight = null; S.stream = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -504,6 +505,19 @@
     return [...map.values()];
   }
 
+  // Windows builds record which process opened each proxy connection (flow.process: pid, name, ...).
+  const procLabel = (p) => (p ? `${p.name || '?'} · ${p.pid ?? '?'}` : '');
+  function processGroups() {
+    const map = new Map();
+    for (const f of S.flows) {
+      if (!f.process || f.process.pid === undefined) continue;
+      let g = map.get(f.process.pid);
+      if (!g) map.set(f.process.pid, (g = { pid: f.process.pid, name: f.process.name || '?', count: 0 }));
+      g.count++;
+    }
+    return [...map.values()].sort((a, b) => b.count - a.count);
+  }
+
   function renderSidebar() {
     const html = [];
     for (const view of ['flows', 'packets']) {
@@ -516,6 +530,17 @@
         for (const x of list) if (test(x)) count++;
         html.push(`<button class="side-item ${active ? 'active' : ''}" data-action="category" data-view="${view}" data-cat="${id}">${icon(ic)}<span>${esc(label)}</span><span>${count}</span></button>`);
       }
+    }
+    const procs = S.view === 'flows' ? processGroups() : [];
+    if (procs.length) {
+      html.push(`<div class="side-heading"><span title="Owning process of the client socket, read from the Windows TCP table when the proxy accepted the connection">PROCESSES</span>${S.processPid !== null
+        ? '<button class="flat small" data-action="clear-process">Clear</button>' : `<span>${procs.length}</span>`}</div>`);
+      html.push('<div class="connections">');
+      for (const g of procs.slice(0, 200)) {
+        html.push(`<div class="connection ${g.pid === S.processPid ? 'active' : ''}" data-action="process" data-pid="${esc(g.pid)}">
+          <div class="host">${esc(g.name)}</div><div class="sub">pid ${esc(g.pid)} · ${g.count}</div></div>`);
+      }
+      html.push('</div>');
     }
     const groups = connectionGroups();
     html.push(`<div class="side-heading"><span>CONNECTIONS</span>${S.connection
@@ -552,7 +577,7 @@
         ${flows ? '<span class="muted small">Tick two rows to compare</span>' : ''}
       </div>
       <div class="searchbar">
-        <input type="search" id="search" spellcheck="false" placeholder="${flows ? 'Filter by host, path, method, status, connection…' : 'Filter by address, port, protocol, info…'}" value="${esc(S.search[S.view])}" aria-label="Filter rows">
+        <input type="search" id="search" spellcheck="false" placeholder="${flows ? 'Filter by host, path, method, status, connection, process…' : 'Filter by address, port, protocol, info…'}" value="${esc(S.search[S.view])}" aria-label="Filter rows">
         ${flows ? `<select id="stateFilter" aria-label="State">${['', 'complete', 'streaming', 'pending', 'error', 'interrupted']
           .map((s) => `<option value="${s}" ${S.stateFilter === s ? 'selected' : ''}>${s || 'Any state'}</option>`).join('')}</select>` : ''}
       </div>
@@ -565,7 +590,7 @@
     let h = searchCache.get(x);
     if (h === undefined) {
       h = (S.view === 'flows'
-        ? [x.id, x.method, x.host, x.port, x.path, x.status, x.protocol, x.state, x.error, x.notes, x.connection]
+        ? [x.id, x.method, x.host, x.port, x.path, x.status, x.protocol, x.state, x.error, x.notes, x.connection, x.process?.name, x.process?.pid]
         : [x.id, x.source, x.destination, x.protocol, x.summary, x.flags, x.dnsName]).join(' ').toLowerCase();
       searchCache.set(x, h);
     }
@@ -581,6 +606,7 @@
       if (!test(x)) return false;
       if (S.connection && (S.view === 'flows' ? x.connection : x.key) !== S.connection) return false;
       if (S.view === 'flows' && S.stateFilter && x.state !== S.stateFilter) return false;
+      if (S.view === 'flows' && S.processPid !== null && x.process?.pid !== S.processPid) return false;
       if (terms.length) { const h = haystack(x); if (!terms.every((t) => h.includes(t))) return false; }
       return true;
     });
@@ -594,7 +620,7 @@
     return code && state ? `${code} ${state}` : code + state;
   }
 
-  function flowRow(f) {
+  function flowRow(f, showProc) {
     const selected = S.selected?.kind === 'flow' && S.selected.id === f.id;
     const m = String(f.method || '').toLowerCase();
     return `<tr data-action="select-flow" data-id="${f.id}" class="${selected ? 'selected' : ''}">
@@ -603,6 +629,7 @@
       <td><span class="method ${esc(m)}">${esc(f.method)}</span></td>
       <td><span class="target">${esc(f.host)}</span><span class="path">${esc(f.path)}</span></td>
       <td>${statusCell(f)}</td>
+      ${showProc ? `<td class="small" title="${esc(f.process?.error || '')}">${f.process ? `${esc(f.process.name || '?')}<span class="path">pid ${esc(f.process.pid ?? '?')}</span>` : ''}</td>` : ''}
       <td class="mono small">${esc(f.protocol)}</td>
       <td class="mono small">↑ ${fmtBytes(f.requestBytes)}${f.truncated ? ' <span class="badge warn" title="Body larger than the 1 MiB per-direction capture limit">cut</span>' : ''}<span class="path">↓ ${fmtBytes(f.responseBytes)}</span></td>
       <td class="mono small">${esc(fmtDuration(f.duration))}</td>
@@ -624,7 +651,7 @@
 
   function emptyTable(filteredOut) {
     if (filteredOut) {
-      return `<div class="empty">${icon('list')}<strong>No rows match</strong><p>The category, connection, state or text filter hides every row.</p>
+      return `<div class="empty">${icon('list')}<strong>No rows match</strong><p>The category, process, connection, state or text filter hides every row.</p>
         <div class="actions"><button data-action="clear-filters">Clear filters</button></div></div>`;
     }
     if (OFFLINE) return `<div class="empty">${icon('inbox')}<strong>Nothing in this report</strong></div>`;
@@ -649,9 +676,10 @@
     if (!rows.length) {
       wrap.innerHTML = emptyTable(total > 0);
     } else if (S.view === 'flows') {
-      wrap.innerHTML = `<table class="traffic"><colgroup><col style="width:30px"><col style="width:42px"><col style="width:70px"><col><col style="width:64px"><col style="width:78px"><col style="width:96px"><col style="width:66px"></colgroup>
-        <thead><tr><th></th><th>#</th><th>Method</th><th>Host / path</th><th>Status</th><th>Protocol</th><th>Size</th><th>Time</th></tr></thead>
-        <tbody>${rows.map(flowRow).join('')}</tbody></table>`;
+      const showProc = S.flows.some((f) => f.process);
+      wrap.innerHTML = `<table class="traffic"><colgroup><col style="width:30px"><col style="width:42px"><col style="width:70px"><col><col style="width:64px">${showProc ? '<col style="width:104px">' : ''}<col style="width:78px"><col style="width:96px"><col style="width:66px"></colgroup>
+        <thead><tr><th></th><th>#</th><th>Method</th><th>Host / path</th><th>Status</th>${showProc ? '<th title="Process that opened the proxy connection (Windows)">Process</th>' : ''}<th>Protocol</th><th>Size</th><th>Time</th></tr></thead>
+        <tbody>${rows.map((f) => flowRow(f, showProc)).join('')}</tbody></table>`;
     } else {
       wrap.innerHTML = `<table class="traffic packet-table">
         <thead><tr><th>#</th><th>Time</th><th>Source</th><th>Destination</th><th>Proto</th><th>Len</th><th>Info</th></tr></thead>
@@ -775,12 +803,19 @@
   // --- Overview -------------------------------------------------------------
 
   const META_ORDER = ['id', 'method', 'host', 'port', 'path', 'protocol', 'status', 'state', 'error', 'time', 'duration',
-    'tls', 'alpn', 'cipher', 'encrypted', 'connection', 'streamId', 'upstreamStreamId', 'requestFrames', 'responseFrames',
+    'process', 'tls', 'alpn', 'cipher', 'encrypted', 'connection', 'streamId', 'upstreamStreamId', 'requestFrames', 'responseFrames',
     'requestBytes', 'responseBytes', 'truncated', 'requestTrailers', 'responseTrailers', 'packetKeys', 'source'];
   const META_HIDDEN = new Set(['request', 'response', 'timeline', 'messages', 'notes']);
   const metaRank = (k) => { const i = META_ORDER.indexOf(k); return i < 0 ? 999 : i; };
 
   function fmtMeta(k, v) {
+    if (k === 'process' && v && typeof v === 'object') {
+      const line = (label, value) => (value === undefined || value === '' ? '' : `<div><span class="muted">${esc(label)}</span> <span class="mono">${esc(value)}</span></div>`);
+      return line('exe', v.name) + line('pid', v.pid) + line('path', v.path) + line('command line', v.commandLine)
+        + line('parent', v.parentPid === undefined ? '' : `${v.parentName || '?'} (pid ${v.parentPid})`)
+        + line('lookup error', v.error) + line('source', v.source)
+        + '<div class="small muted">Read once when the proxy accepted the connection. PIDs are reused by Windows, so the parent may no longer be the process that started it.</div>';
+    }
     if (k === 'time') return esc(`${fmtDate(v)}  (${v})`);
     if (k === 'duration') return esc(`${v} ms`);
     if (/Bytes$/.test(k)) return esc(`${v}  (${fmtBytes(v)})`);
@@ -1333,6 +1368,7 @@
     const fields = [
       ['method', (f) => f.method], ['url', flowUrl], ['protocol', (f) => f.protocol], ['status', (f) => f.status],
       ['state', (f) => f.state], ['error', (f) => f.error], ['alpn', (f) => f.alpn], ['tls', (f) => f.tls],
+      ['process', (f) => procLabel(f.process)], ['command line', (f) => f.process?.commandLine],
       ['connection', (f) => f.connection], ['stream id', (f) => f.streamId], ['started', (f) => fmtDate(f.time)],
       ['duration ms', (f) => f.duration], ['request headers', (f) => (f.request?.headers || []).length],
       ['response headers', (f) => (f.response?.headers || []).length], ['request bytes', (f) => f.requestBytes],
@@ -1555,7 +1591,9 @@
     category: (el) => setView(el.dataset.view, el.dataset.cat),
     connection: (el) => { S.connection = S.connection === el.dataset.key ? '' : el.dataset.key; renderSidebar(); renderTable(); },
     'clear-connection': () => { S.connection = ''; renderSidebar(); renderTable(); },
-    'clear-filters': () => { S.search[S.view] = ''; S.stateFilter = ''; S.connection = ''; S.category = 'all'; renderSidebar(); renderCenter(); renderTable(); },
+    process: (el) => { const pid = Number(el.dataset.pid); S.processPid = S.processPid === pid ? null : pid; renderSidebar(); renderTable(); },
+    'clear-process': () => { S.processPid = null; renderSidebar(); renderTable(); },
+    'clear-filters': () => { S.search[S.view] = ''; S.stateFilter = ''; S.connection = ''; S.processPid = null; S.category = 'all'; renderSidebar(); renderCenter(); renderTable(); },
     'select-flow': (el) => { S.backTo = null; return select('flow', Number(el.dataset.id)); },
     'select-packet-row': (el) => select('packet', Number(el.dataset.id)),
     'open-packet': (el) => openPacket(Number(el.dataset.id), S.selected?.kind === 'flow' ? S.selected.id : S.backTo),
