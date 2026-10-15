@@ -201,12 +201,34 @@ void exports() {
     CHECK(script.find("<!--") == std::string::npos);
 #endif
 }
+
+// Windows process attribution is stored on the flow; the list carries only pid/name, exports may hide the rest.
+void processRecord() {
+    Store s;
+    json who = {{"pid", 4242}, {"name", "node.exe"}, {"path", "C:\\Users\\someone\\AppData\\node.exe"},
+                {"commandLine", "node.exe cli.js --api-key sk-secret"}, {"parentPid", 100}, {"parentName", "pwsh.exe"}};
+    auto id = s.createFlow({{"method", "GET"}, {"host", "api.example"}, {"path", "/"}, {"process", who}});
+    auto listed = s.snapshot()["flows"][0]["process"];
+    CHECK_EQ(listed.size(), size_t(2));
+    CHECK_EQ(listed["pid"].get<int>(), 4242);
+    CHECK_EQ(listed["name"].get<std::string>(), "node.exe"s);
+    CHECK(s.flow(id)["process"] == who);
+    auto archive = s.archive();
+    CHECK(archive["flows"][0]["process"] == who);
+    Store copy; copy.restore(archive);
+    CHECK(copy.flow(id)["process"] == who);  // survives .wscope round trip
+    auto redacted = redactedArchive(archive)["flows"][0]["process"];
+    CHECK_EQ(redacted["commandLine"].get<std::string>(), "[redacted]"s);
+    CHECK_EQ(redacted["path"].get<std::string>(), "[redacted]"s);
+    CHECK_EQ(redacted["pid"].get<int>(), 4242);
+    CHECK_EQ(redacted["parentName"].get<std::string>(), "pwsh.exe"s);
+}
 }
 
 int main() {
     for (auto& [name, fn] : std::vector<std::pair<const char*, void (*)()>>{
              {"encoding", encoding}, {"body limit", bodyLimit}, {"packets", packets}, {"capture files", captureFiles},
-             {"stream gaps", streamGaps}, {"sessions", sessions}, {"exports", exports}}) {
+             {"stream gaps", streamGaps}, {"sessions", sessions}, {"exports", exports}, {"process record", processRecord}}) {
         try { fn(); } catch (const std::exception& e) { ++failures; std::cerr << name << ": unexpected exception: " << e.what() << "\n"; }
     }
     std::cout << checks << " checks, " << failures << " failures\n";

@@ -348,6 +348,7 @@ def main():
         check(pcapng[:4] == b"\x0a\x0d\x0d\x0a", "pcapng export")
         status, ifs = engine.request("GET", "/api/interfaces")
         check(status == 200 and "interfaces" in ifs, "interface listing answers")
+        print(f"  info capture: available={ifs.get('available')} interfaces={len(ifs.get('interfaces', []))} error={ifs.get('error', '')!r}")
         print(f"\nartifacts kept in {tmp}" if failures else "")
     finally:
         for p in procs:
