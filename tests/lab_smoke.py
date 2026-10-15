@@ -166,7 +166,7 @@ def v2(tmp, h1):
 
 
 def h2_server(tmp, files):
-    """nghttpd serving `files` (name -> bytes) over TLS with a response trailer."""
+    """nghttpd (or tests/h2_server.py) serving `files` (name -> bytes) over TLS with a response trailer."""
     if not os.path.exists(f"{tmp}/server.pem"):
         it.make_certs(tmp)
     docs = f"{tmp}/h2docs"
@@ -175,9 +175,9 @@ def h2_server(tmp, files):
         with open(f"{docs}/{name}", "wb") as f:
             f.write(data)
     port = it.free_port()
-    proc = subprocess.Popen([it.NGHTTPD, "--address=127.0.0.1", f"--htdocs={docs}", "--trailer=x-h2-trailer: yes", str(port),
+    proc = subprocess.Popen([*it.H2D, "--address=127.0.0.1", f"--htdocs={docs}", "--trailer=x-h2-trailer: yes", str(port),
                              f"{tmp}/server.key", f"{tmp}/server.pem"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.3)
+    it.wait_port(port)
     return port, proc
 
 

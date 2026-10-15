@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """End-to-end test: real clients -> WireScope proxy -> local test servers.
 
-Runs on a development host (macOS/Linux) with curl (HTTP/2 enabled), openssl and nghttpd.
+Runs with curl (HTTP/2 enabled) and openssl. The HTTP/2 upstream is nghttpd when installed, otherwise
+tests/h2_server.py on the Python 'h2' package (the Windows path; force it with WIRESCOPE_H2_SERVER=python).
+CURL / OPENSSL / NGHTTPD environment variables override the tools found on PATH.
 It does not cover Npcap or Windows trust-store behaviour.
 
     python3 tests/integration_test.py [path/to/build]
@@ -28,7 +30,13 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build"))
 NGHTTPD = os.environ.get("NGHTTPD") or shutil.which("nghttpd") or "/opt/homebrew/opt/nghttp2/bin/nghttpd"
-OPENSSL = shutil.which("openssl")
+if os.environ.get("WIRESCOPE_H2_SERVER") == "python" or not os.path.exists(NGHTTPD):
+    H2D = [sys.executable, os.path.join(ROOT, "tests", "h2_server.py")]  # same arguments as nghttpd
+else:
+    H2D = [NGHTTPD]
+OPENSSL = os.environ.get("OPENSSL") or shutil.which("openssl")
+CURL = os.environ.get("CURL") or shutil.which("curl") or "curl"
+EXE = ".exe" if os.name == "nt" else ""
 
 failures = []
 
@@ -43,6 +51,17 @@ def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def wait_port(port, timeout=10):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            return True
+        except OSError:
+            time.sleep(0.05)
+    return False
 
 
 BIG = bytes(range(256)) * 6144  # 1.5 MiB, larger than the 1 MiB capture limit
@@ -111,7 +130,7 @@ class Engine:
     def __init__(self, tmp):
         self.port = free_port()
         env = dict(os.environ, SSL_CERT_FILE=f"{tmp}/up-ca.pem")  # upstream verification trusts the test CA
-        self.proc = subprocess.Popen([f"{BUILD}/WireScope", "--no-open", "--port", str(self.port), "--data", f"{tmp}/data",
+        self.proc = subprocess.Popen([f"{BUILD}/WireScope{EXE}", "--no-open", "--port", str(self.port), "--data", f"{tmp}/data",
                                       "--web", f"{BUILD}/web"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.base = f"http://127.0.0.1:{self.port}"
         for _ in range(100):
@@ -144,7 +163,7 @@ class Engine:
 
 
 def curl(*args, proxy):
-    r = subprocess.run(["curl", "-sS", "--max-time", "20", "-x", f"http://127.0.0.1:{proxy}", *args], capture_output=True)
+    r = subprocess.run([CURL, "-sS", "--max-time", "20", "-x", f"http://127.0.0.1:{proxy}", *args], capture_output=True)
     return r.returncode, r.stdout, r.stderr.decode()
 
 
@@ -198,8 +217,10 @@ def main():
             with open(f"{tmp}/htdocs/f{i}.json", "w") as f:
                 json.dump({"file": i, "pad": "x" * (2000 * i)}, f)
         h2port = free_port()
-        procs.append(subprocess.Popen([NGHTTPD, f"--address=127.0.0.1", f"--htdocs={tmp}/htdocs", "--trailer=x-h2-trailer: yes",
+        procs.append(subprocess.Popen([*H2D, f"--address=127.0.0.1", f"--htdocs={tmp}/htdocs", "--trailer=x-h2-trailer: yes",
                                        str(h2port), f"{tmp}/server.key", f"{tmp}/server.pem"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        if not wait_port(h2port):
+            raise RuntimeError(f"HTTP/2 test server did not start: {' '.join(H2D)}")
         engine = Engine(tmp)
         procs.append(engine.proc)
         H1, HS = h1.server_address[1], hs.server_address[1]
