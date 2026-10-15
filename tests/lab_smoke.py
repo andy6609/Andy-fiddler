@@ -345,7 +345,34 @@ def v5(tmp, h1):
     return path, request, (r1, r2, r3)
 
 
-VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5)]
+def v6(tmp, h1):
+    print("v6_live_capture")
+    if not os.path.exists(f"{BUILD}/lab/v6_live_capture"):
+        print("  skip (not built)")
+        return
+    rc, out = run("v6_live_capture")
+    check(rc == 0 and "인터페이스" in out, "interface listing")
+    rc, out = run("v6_live_capture", "lo0" if sys.platform == "darwin" else "lo", "-c", "1")
+    if rc == 2:
+        check("Permission denied" in out or "permission" in out, "live capture without privileges fails with the OS reason (expected on this host)")
+    else:
+        check(rc == 0, "live capture ran (privileged host)")
+    pcap, _, _ = tcp_conversation()
+    src = f"{tmp}/v6in.pcap"
+    with open(src, "wb") as f:
+        f.write(pcap + it.synthetic_pcap()[24:])   # TCP conversation followed by the synthetic HTTP/DNS packets
+    rc, out = run("v6_live_capture", "-r", src, "-f", "udp port 53")
+    check(rc == 0 and "필터 통과 1 패킷" in out and "UDP 10.0.0.1:53000 -> 10.0.0.2:53" in out, "BPF filter applied to a file: only the DNS packet")
+    rc, out = run("v6_live_capture", "-r", src, "-f", "tcp port 80", "--dump-filter", "-w", f"{tmp}/v6out.pcap")
+    check(rc == 0 and "BPF 명령어" in out and "jeq" in out, "compiled BPF instructions printed")
+    rc, out = run("v5_tcp_stream", f"{tmp}/v6out.pcap")
+    # Both inputs reuse 10.0.0.1:50000 <-> 10.0.0.2:80, so v5 merges them: the 4-tuple reuse limit from v5-notes.
+    check(rc == 0 and "1 connections" in out and "14 packets" in out, "file written with -w is readable by v5 (same 4-tuple merged)")
+    rc, out = run("v6_live_capture", "-r", src, "-f", "tcp port")
+    check(rc == 3 and "필터 문법 오류" in out, "bad filter rejected")
+
+
+VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6)]
 
 
 def main():
