@@ -51,6 +51,9 @@ def start(name, *args, env=None):
     return proc
 
 
+LOGS = []  # output of the lab programs a version started; printed when that version has failures
+
+
 def stop(proc):
     proc.terminate()
     try:
@@ -58,7 +61,9 @@ def stop(proc):
     except subprocess.TimeoutExpired:
         proc.kill()
         out, _ = proc.communicate()
-    return out.decode(errors="replace")
+    text = out.decode(errors="replace")
+    LOGS.append((proc.args[0], proc.returncode, text))
+    return text
 
 
 def read_flows(path):
@@ -485,7 +490,15 @@ def main():
     h1 = it.serve(http.server.ThreadingHTTPServer(("127.0.0.1", it.free_port()), it.Handler)).server_address[1]
     for name, fn in VERSIONS:
         if not ONLY or name in ONLY:
-            fn(tmp, h1)
+            before = len(failures)
+            LOGS.clear()
+            try:
+                fn(tmp, h1)
+            finally:
+                if len(failures) > before or sys.exc_info()[0]:
+                    for prog, code, text in LOGS:
+                        tail = "\n".join(text.splitlines()[-15:])
+                        print(f"  log  {os.path.basename(prog)} exit={code}:\n{tail}")
     print(f"{len(failures)} failures")
     return 1 if failures else 0
 
