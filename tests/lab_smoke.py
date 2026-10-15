@@ -11,6 +11,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -255,8 +256,8 @@ def udp_dns(name_bytes, ipv6=False, vlan=False):
     return eth + ip + udp
 
 
-def run(name, *args):
-    r = subprocess.run([f"{BUILD}/lab/{name}", *args], capture_output=True, env=dict(os.environ, NO_COLOR="1"))
+def run(name, *args, cwd=None, env=None):
+    r = subprocess.run([f"{BUILD}/lab/{name}", *args], capture_output=True, cwd=cwd, env=dict(env or os.environ, NO_COLOR="1"))
     return r.returncode, r.stdout.decode(errors="replace")
 
 
@@ -482,7 +483,51 @@ def v8(tmp, h1):
     check("$.metadata.user_id" in html and "pattern-based" in html, "redacted report keeps paths and says redaction is pattern-based")
 
 
-VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7), ("v8", v8)]
+def v9(tmp, h1):
+    print("v9_win_owner")
+    rc, out = run("v9_win_owner", "--self")
+    if os.name != "nt":
+        check(rc == 0 and "Windows" in out, "prints that it is Windows-only and exits 0")
+        return
+    me = re.search(r"client 쪽 줄의 owning pid = (\d+), 이 프로그램의 pid = (\d+)", out)
+    check(rc == 0 and "[client row]" in out and "[proxy row]" in out, "--self: loopback pair found as two rows (client side, proxy side)")
+    check(me and me[1] == me[2], f"--self: client-side row's owning PID is the demo itself ({me.groups() if me else out[-300:]})")
+    rc, out = run("v9_win_owner", "--port", str(h1))
+    listen = [line for line in out.splitlines() if line.startswith("LISTEN") and f"127.0.0.1:{h1} " in line]
+    check(listen and f"pid {os.getpid()} " in listen[0], f"--port: this test's HTTP server LISTEN row carries this test's PID ({listen[:1]})")
+
+
+def v10(tmp, h1):
+    print("v10_win_sysproxy")
+    env = dict(os.environ, HTTPS_PROXY="http://127.0.0.1:9", NODE_EXTRA_CA_CERTS="C:\\lab\\ca.pem")
+    rc, out = run("v10_win_sysproxy", env=env)
+    if os.name != "nt":
+        check(rc == 0 and "Windows" in out, "prints that it is Windows-only and exits 0")
+        return
+    check(rc == 0 and "[1] WinINET" in out and "[2] WinHTTP" in out and "[3]" in out, "shows WinINET, WinHTTP and environment side by side")
+    check("http://127.0.0.1:9" in out and "C:\\lab\\ca.pem" in out, "environment section shows the variables this process was given")
+    check("access type" in out, f"WinHTTP default configuration read ({[l for l in out.splitlines() if 'access type' in l][:1]})")
+    if os.environ.get("CI") != "true" and os.environ.get("WIRESCOPE_TEST_SYSPROXY") != "1":
+        print("  skip --set/--restore (changes this user's proxy setting; set WIRESCOPE_TEST_SYSPROXY=1)")
+        return
+    import winreg
+    def proxy_server():
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        try:
+            return winreg.QueryValueEx(key, "ProxyEnable")[0], winreg.QueryValueEx(key, "ProxyServer")[0]
+        except FileNotFoundError:
+            return winreg.QueryValueEx(key, "ProxyEnable")[0], ""
+    before = proxy_server()
+    rc, out = run("v10_win_sysproxy", "--set", "18999", cwd=tmp)
+    check(rc == 0 and proxy_server() == (1, "127.0.0.1:18999") and os.path.exists(f"{tmp}/v10-proxy-backup.json"),
+          f"--set writes WinINET (registry now {proxy_server()}) after saving a backup")
+    rc, out = run("v10_win_sysproxy", "--restore", cwd=tmp)
+    after = proxy_server()
+    check(rc == 0 and after[0] == before[0] and (after[1] or "") == (before[1] or "") and not os.path.exists(f"{tmp}/v10-proxy-backup.json"),
+          f"--restore brings back {before} (now {after}) and deletes the backup")
+
+
+VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7), ("v8", v8), ("v9", v9), ("v10", v10)]
 
 
 def main():
