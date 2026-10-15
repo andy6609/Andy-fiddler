@@ -26,11 +26,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Test tools (Python h2, Git for Windows curl/openssl)
+      - name: Test tools (Python h2, curl with OpenSSL-family TLS + HTTP/2, openssl CLI)
         run: |
           python -m pip install --disable-pip-version-check --quiet h2
-          # Windows' own C:\Windows\System32\curl.exe is Schannel-based without HTTP/2; Git's curl has both OpenSSL and nghttp2.
-          $curl = 'C:\Program Files\Git\mingw64\bin\curl.exe'
+          # Windows' System32 curl and (as of image 20260925) Git's curl are Schannel-only builds without HTTP/2;
+          # Schannel also fails revocation checks for a local CA. Use the official curl for Windows build instead.
+          Invoke-WebRequest -Uri 'https://curl.se/windows/latest.cgi?p=win64-mingw.zip' -OutFile "$env:RUNNER_TEMP\curl.zip"
+          Expand-Archive "$env:RUNNER_TEMP\curl.zip" -DestinationPath "$env:RUNNER_TEMP\curl"
+          $curl = (Get-ChildItem "$env:RUNNER_TEMP\curl" -Recurse -Filter curl.exe | Select-Object -First 1).FullName
+          $features = (& $curl -V) -join "`n"
+          if ($features -notmatch 'HTTP2' -or $features -notmatch '(OpenSSL|LibreSSL|BoringSSL|quictls)') { throw "curl lacks HTTP/2 or OpenSSL-family TLS:`n$features" }
           $openssl = @('C:\Program Files\Git\mingw64\bin\openssl.exe', 'C:\Program Files\Git\usr\bin\openssl.exe', 'C:\Program Files\OpenSSL\bin\openssl.exe') |
             Where-Object { Test-Path $_ } | Select-Object -First 1
           & $curl -V
