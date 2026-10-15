@@ -6,6 +6,11 @@
 1. Process attribution: a flow names the process that opened the proxy connection. The test starts
    curl.exe and python.exe children itself, so it knows the real PIDs and compares them with what
    WireScope recorded (pid, exe name/path, command line, parent = this test process).
+2. System proxy: turning it on writes the WinINET setting (checked in the registry), a client that
+   reads the system setting (Python urllib, no proxy argument) then goes through WireScope, and every
+   way out restores the original value: turning it off, stopping the proxy, and the next start after
+   a crash (TerminateProcess). This changes the current user's proxy setting for a few seconds, so it
+   runs only when CI=true (GitHub Actions) or WIRESCOPE_TEST_SYSPROXY=1.
 
 Reuses tests/integration_test.py for the local servers, certificates and the engine wrapper.
 """
@@ -37,6 +42,29 @@ def run_child(args):
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, _ = proc.communicate(timeout=30)
     return proc.pid, proc.returncode, out
+
+
+def registry():
+    """The legacy Internet Settings values many clients read directly (Python urllib does)."""
+    import winreg
+    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+    out = {}
+    for name in ("ProxyEnable", "ProxyServer", "ProxyOverride", "AutoConfigURL"):
+        try:
+            out[name] = winreg.QueryValueEx(key, name)[0]
+        except FileNotFoundError:
+            out[name] = None
+    winreg.CloseKey(key)
+    return out
+
+
+def same_registry(a, b):
+    # An absent value and an empty/zero one mean the same to WinINET clients.
+    return all((a.get(k) or "") == (b.get(k) or "") for k in a)
+
+
+def same_settings(a, b):
+    return all(a.get(k) == b.get(k) for k in ("flags", "server", "bypass", "autoConfigUrl"))
 
 
 def same_file(a, b):
@@ -103,6 +131,75 @@ def process_checks(engine, tmp, h1, hs, h2port, proxy):
     check(procs and all("pid" in p and "name" in p for p in procs), "redacted report keeps pid and exe name")
 
 
+def sysproxy_checks(engine, tmp, h1, proxy):
+    """Returns the engine still running at the end (the crash check replaces the original one)."""
+    print("System proxy (WinINET per-connection options)")
+    backup = f"{tmp}/data/system-proxy-backup.json"
+    status, st = engine.request("GET", "/api/sysproxy")
+    original, reg0 = st.get("current", {}), registry()
+    print(f"  info original WinINET: {json.dumps(original)}")
+    print(f"  info original registry: {json.dumps(reg0)}")
+    check(st.get("supported") is True and not st.get("leftover"), "supported, no leftover backup at start")
+
+    status, st = engine.request("POST", "/api/sysproxy", {"enable": True})
+    cur = st.get("current", {})
+    check(status == 200 and cur.get("enabled") and cur.get("server") == f"127.0.0.1:{proxy}" and st.get("ownedByWireScope"),
+          f"enable: WinINET now reads back 127.0.0.1:{proxy} ({cur.get('server')})")
+    check(os.path.exists(backup), "backup file written")
+    reg = registry()
+    print(f"  info registry while on: {json.dumps(reg)}")
+    check(reg["ProxyEnable"] == 1 and reg["ProxyServer"] == f"127.0.0.1:{proxy}", "registry ProxyEnable=1 / ProxyServer reflect the change")
+
+    # A client that is given no proxy at all, only the system setting: Python's default urllib opener.
+    before = len(engine.flows())
+    env = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}
+    code = ("import urllib.request,sys;sys.stderr.write(repr(urllib.request.getproxies()));"
+            f"sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:{h1}/hello?who=system-proxy').read().decode())")
+    child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    out, err = child.communicate(timeout=30)
+    print(f"  info child urllib.getproxies(): {err.decode(errors='replace')[:300]}")
+    flows = it.wait_settled(engine, before + 1)[before:]
+    sp = [f for f in flows if f.get("path") == "/hello?who=system-proxy"]
+    check(child.returncode == 0 and out == b"hello world" and len(sp) == 1, "python urllib with no proxy argument went through WireScope")
+    check(sp and (sp[0].get("process") or {}).get("pid") == child.pid, "that flow is attributed to the python child")
+
+    status, st = engine.request("POST", "/api/sysproxy", {"enable": False})
+    check(status == 200 and same_settings(st.get("current", {}), original), f"disable: WinINET back to the original ({st.get('current')})")
+    check(not os.path.exists(backup), "backup file removed after restore")
+    check(same_registry(registry(), reg0), f"registry back to the original ({registry()})")
+
+    engine.request("POST", "/api/sysproxy", {"enable": True})
+    engine.request("POST", "/api/proxy/stop", {})
+    st = engine.request("GET", "/api/sysproxy")[1]
+    check(same_settings(st.get("current", {}), original) and not st.get("ownedByWireScope"), "stopping the proxy restores the system proxy first")
+
+    # Crash: nothing runs in WireScope after TerminateProcess, so only the backup file can save the user.
+    engine.request("POST", "/api/proxy/start", {"port": proxy, "mitm": True})
+    engine.request("POST", "/api/sysproxy", {"enable": True})
+    engine.proc.kill()
+    engine.proc.wait(timeout=10)
+    check(registry()["ProxyServer"] == f"127.0.0.1:{proxy}" and os.path.exists(backup),
+          "after TerminateProcess the setting still points at the dead proxy and the backup file remains")
+    engine = it.Engine(tmp)
+    st = engine.request("GET", "/api/sysproxy")[1]
+    check(st.get("leftover") is True and not st.get("ownedByWireScope"), "the next start reports the leftover backup")
+    status, st = engine.request("POST", "/api/sysproxy", {"enable": False})
+    check(status == 200 and same_settings(st.get("current", {}), original) and same_registry(registry(), reg0),
+          "restoring from the leftover backup brings back the original setting")
+    return engine
+
+
+def ensure_restored(tmp):
+    """Safety net: never leave this machine's proxy pointing at a test port."""
+    if os.path.exists(f"{tmp}/data/system-proxy-backup.json"):
+        engine = it.Engine(tmp)
+        try:
+            print("  info safety restore:", engine.request("POST", "/api/sysproxy", {"enable": False})[0])
+        finally:
+            engine.proc.terminate()
+            engine.proc.wait(timeout=10)
+
+
 def main():
     if os.name != "nt":
         print("Windows only; nothing to do on this host")
@@ -132,6 +229,11 @@ def main():
         status, st = engine.request("POST", "/api/proxy/start", {"port": proxy, "mitm": True})
         check(status == 200 and st["running"], "proxy starts")
         process_checks(engine, tmp, h1, hs, h2port, proxy)
+        if os.environ.get("CI") == "true" or os.environ.get("WIRESCOPE_TEST_SYSPROXY") == "1":
+            engine = sysproxy_checks(engine, tmp, h1, proxy)
+            procs.append(engine.proc)
+        else:
+            print("  skip system proxy checks (they flip this user's proxy setting; set WIRESCOPE_TEST_SYSPROXY=1)")
         engine.request("POST", "/api/proxy/stop", {})
     finally:
         for p in procs:
@@ -141,6 +243,7 @@ def main():
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 p.kill()
+        ensure_restored(tmp)
     print(f"{len(failures)} failures")
     return 1 if failures else 0
 
