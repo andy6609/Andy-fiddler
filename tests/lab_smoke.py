@@ -190,14 +190,25 @@ def v3(tmp, h1):
         urls = [f"https://localhost:{port}/{n}" for n in H2_FILES]
         rc, body, err = it.curl("--http2", "--cacert", out + ".ca.pem", "-Z", "--parallel-max", "3", *urls, proxy=18083)
         check(rc == 0 and body.count(b'"file"') == 3, f"3 parallel h2 requests relayed byte-for-byte {err.strip()}")
+        rc, body, _ = it.curl("--http2", "--cacert", out + ".ca.pem", "-d", "posted-body", urls[1], proxy=18083)
+        check(rc == 0, "h2 POST relayed")
         time.sleep(0.5)
     finally:
         log = stop(proc)
         ng.terminate()
-    conns = read_flows(out)
-    check(len(conns) == 1 and conns[0]["alpn"] == "h2", "one h2 connection recorded")
+    records = read_flows(out)
+    conns = [r for r in records if r.get("kind") == "h2-connection"]
+    streams = [r for r in records if r.get("kind") == "h2-stream"]
+    check(len(conns) == 2 and all(c["alpn"] == "h2" for c in conns), "two h2 connections recorded")
+    gets = sorted((st for st in streams if st["method"] == "GET"), key=lambda st: st["path"])
+    check(len(gets) == 3 and all(st["status"] == 200 and st["state"] == "complete" for st in gets), "HPACK: 3 GET streams with :path and :status 200")
+    check(all(base64.b64decode(st["response"]["base64"]) == H2_FILES[st["path"][1:]] for st in gets), "response body per stream matches the file")
+    check(all(st["responseTrailers"] == [["x-h2-trailer", "yes"]] for st in gets), "trailer HEADERS recognised as trailers")
+    check(all(any(k == "user-agent" for k, _ in st["requestHeaders"]) for st in gets), "dynamic-table headers decoded on later streams too")
+    post = [st for st in streams if st["method"] == "POST"]
+    check(post and base64.b64decode(post[0]["request"]["base64"]) == b"posted-body", "h2 request body recorded")
     if conns:
-        c = conns[0]
+        c = max(conns, key=lambda c: len(c["streams"]))
         types = {(f["dir"], f["type"]) for f in c["frames"]}
         check({("C->S", "SETTINGS"), ("S->C", "SETTINGS"), ("C->S", "HEADERS"), ("S->C", "DATA")} <= types, "SETTINGS/HEADERS/DATA frames seen both ways")
         ids = sorted(s["stream"] for s in c["streams"])
