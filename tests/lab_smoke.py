@@ -120,6 +120,35 @@ def v2(tmp, h1):
         check(t[0]["request"]["total"] > 0 and t[0]["response"]["total"] > len("hello world"), "encrypted byte counts recorded")
         check(b"hello world" not in base64.b64decode(t[0]["response"]["base64"]), "tunnel bytes are ciphertext (plaintext body not visible)")
 
+    print("v2_tls_recorder (--mitm)")
+    out = f"{tmp}/v2m.jsonl"
+    env = dict(os.environ, SSL_CERT_FILE=f"{tmp}/up-ca.pem")   # upstream verification trusts the test server CA
+    proc = start("v2_tls_recorder", out, "--mitm", env=env)
+    ca = out + ".ca.pem"
+    try:
+        rc, body, err = it.curl("--http1.1", "--cacert", ca, f"https://localhost:{hs}/hello", proxy=18082)
+        check(rc == 0 and body == b"hello world", f"HTTPS via MITM with the lab CA {err.strip()}")
+        payload = os.urandom(3000)
+        with open(f"{tmp}/p2.bin", "wb") as f:
+            f.write(payload)
+        rc, body, _ = it.curl("--http1.1", "--cacert", ca, "--data-binary", f"@{tmp}/p2.bin", f"https://localhost:{hs}/echo", proxy=18082)
+        check(rc == 0 and json.loads(body)["len"] == 3000, "HTTPS POST relayed")
+        rc, body, _ = it.curl("--http2", "--cacert", ca, f"https://localhost:{hs}/chunked", proxy=18082)
+        check(rc == 0 and body == b"part1-part2", "client asking for h2 is served over HTTP/1.1 (ALPN)")
+        rc, _, _ = it.curl("--http1.1", f"https://localhost:{hs}/hello", proxy=18082)
+        check(rc != 0, "client without the lab CA refuses the forged certificate")
+        time.sleep(0.3)
+    finally:
+        stop(proc)
+    flows = read_flows(out)
+    https = [f for f in flows if f["scheme"] == "https"]
+    check(len(https) == 3 and all(f["tls"].startswith("TLS") for f in https), "3 decrypted HTTPS flows with TLS version")
+    echo = next((f for f in https if f["path"] == "/echo"), None)
+    check(echo and base64.b64decode(echo["request"]["base64"]) == payload, "decrypted request body recorded")
+    tunnels = [f for f in flows if f["method"] == "CONNECT"]
+    check(any(t["observed"].get("clientAlpn") == "http/1.1" for t in tunnels), "ALPN http/1.1 recorded on the tunnel")
+    check(any("client TLS handshake failed" in t["error"] for t in tunnels), "untrusted-CA handshake failure recorded")
+
 
 VERSIONS = [("v1", v1), ("v2", v2)]
 
