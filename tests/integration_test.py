@@ -27,6 +27,10 @@ import threading
 import time
 import urllib.request
 
+# Windows pipes default to the ANSI code page (cp1252 on the runner); lab programs print Korean.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build"))
 NGHTTPD = os.environ.get("NGHTTPD") or shutil.which("nghttpd") or "/opt/homebrew/opt/nghttp2/bin/nghttpd"
@@ -85,9 +89,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/hello":
+        path = self.path.split("?", 1)[0]  # route on the path; tests tag requests with ?who=...
+        if path == "/hello":
             self.send(200, b"hello world", "text/plain")
-        elif self.path == "/chunked":
+        elif path == "/chunked":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Transfer-Encoding", "chunked")
@@ -96,11 +101,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for part in (b"part1-", b"part2"):
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
             self.wfile.write(b"0\r\nX-Checksum: abc123\r\n\r\n")
-        elif self.path == "/gzip":
+        elif path == "/gzip":
             self.send(200, GZ_JSON, "application/json", [("Content-Encoding", "gzip")])
-        elif self.path == "/big":
+        elif path == "/big":
             self.send(200, BIG, "application/octet-stream")
-        elif self.path == "/sse":
+        elif path == "/sse":
             self.send(200, SSE, "text/event-stream")
         else:
             self.send(404, b"not found", "text/plain")
