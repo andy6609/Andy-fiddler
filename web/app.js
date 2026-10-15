@@ -812,7 +812,7 @@
 
   // --- Overview -------------------------------------------------------------
 
-  const META_ORDER = ['id', 'method', 'host', 'port', 'path', 'protocol', 'status', 'state', 'error', 'time', 'duration',
+  const META_ORDER = ['id', 'method', 'host', 'port', 'path', 'protocol', 'status', 'state', 'error', 'clientClosed', 'time', 'duration',
     'process', 'tls', 'alpn', 'cipher', 'encrypted', 'connection', 'streamId', 'upstreamStreamId', 'requestFrames', 'responseFrames',
     'requestBytes', 'responseBytes', 'truncated', 'requestTrailers', 'responseTrailers', 'packetKeys', 'source'];
   const META_HIDDEN = new Set(['request', 'response', 'timeline', 'messages', 'notes']);
