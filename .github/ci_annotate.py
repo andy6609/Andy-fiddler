@@ -27,7 +27,7 @@ def escape(text):
 
 
 def emit(kind, title, lines, limit=80):
-    shown = lines[:limit]
+    shown = [line if len(line) <= 400 else line[:400] + " ..." for line in lines[:limit]]
     if len(lines) > limit:
         shown.append(f"... {len(lines) - limit} more")
     print(f"::{kind} title={title.replace(',', '%2C').replace(':', '%3A')}::{escape(chr(10).join(shown))}")

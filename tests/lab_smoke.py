@@ -168,7 +168,8 @@ def v2(tmp, h1):
     check(echo and base64.b64decode(echo["request"]["base64"]) == payload, "decrypted request body recorded")
     tunnels = [f for f in flows if f["method"] == "CONNECT"]
     check(any(t["observed"].get("clientAlpn") == "http/1.1" for t in tunnels), "ALPN http/1.1 recorded on the tunnel")
-    check(any("client TLS handshake failed" in t["error"] for t in tunnels), "untrusted-CA handshake failure recorded")
+    check(any("client TLS handshake failed" in t["error"] for t in tunnels),
+          f"untrusted-CA handshake failure recorded (tunnel errors: {[t['error'] for t in tunnels]})")
 
 
 def h2_server(tmp, files):
@@ -343,7 +344,7 @@ def v5(tmp, h1):
     rc, out = run("v5_tcp_stream", f"{tmp}/mixed.pcap")
     check(rc == 0 and "(SYN" not in out and "1 connections" in out, "UDP ignored, SYN seen in synthetic capture")
     rc, out = run("v5_tcp_stream", path, "1")
-    check(request.decode() in out, "out-of-order client segments put back in order")
+    check(request.decode() in out, f"out-of-order client segments put back in order ({out[-200:]!r})")
     check("#4  out of order: arrived before #5" in out, "out-of-order arrival reported")
     check("#7 retransmission" in out, "retransmitted server segment detected and dropped")
     check(f"GAP  {len(r2)} bytes not captured" in out and f"«{len(r2)} bytes missing»hello" in out, "missing bytes shown as a gap, not invented")
@@ -474,11 +475,11 @@ def v8(tmp, h1):
     with open(src, "a") as f:
         f.write(json.dumps(evil) + "\n")
     rc, out = run("v8_diff_report", src, "1", "2", "--report", f"{tmp}/r.html")
-    html = open(f"{tmp}/r.html").read()
+    html = open(f"{tmp}/r.html", encoding="utf-8").read()  # not the Windows ANSI default: the report has "·"
     check(rc == 0 and "<script" not in html and "&lt;script&gt;alert(1)&lt;/script&gt;" in html, "report escapes captured markup, contains no script")
     check("default-src 'none'" in html and "4 added · 0 removed · 1 changed" in html and "topsecret" in html, "report: CSP, diff summary, raw values")
     rc, out = run("v8_diff_report", src, "1", "2", "--report", f"{tmp}/rr.html", "--redact")
-    html = open(f"{tmp}/rr.html").read()
+    html = open(f"{tmp}/rr.html", encoding="utf-8").read()
     check("topsecret" not in html and "sk-secret" not in html and "session=abc" not in html and "u2" not in html, "redacted report hides query, auth, cookie, diff values")
     check("$.metadata.user_id" in html and "pattern-based" in html, "redacted report keeps paths and says redaction is pattern-based")
 
