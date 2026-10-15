@@ -460,6 +460,22 @@ def v8(tmp, h1):
     rc, out = run("v8_diff_report", f"{tmp}/v1.jsonl")
     check(rc == 0 and "#2 POST 127.0.0.1/echo" in out, "lists real v1 records")
 
+    # report: add a record whose response tries to inject markup, with a secret in the query string
+    evil = {"id": 3, "method": "GET", "host": "x.example", "path": "/p?key=topsecret", "status": 200,
+            "requestHeaders": [["Cookie", "session=abc"]], "responseHeaders": [],
+            "request": {"base64": "", "captured": 0, "total": 0},
+            "response": {"base64": base64.b64encode(b"<script>alert(1)</script>").decode(), "captured": 25, "total": 25}}
+    with open(src, "a") as f:
+        f.write(json.dumps(evil) + "\n")
+    rc, out = run("v8_diff_report", src, "1", "2", "--report", f"{tmp}/r.html")
+    html = open(f"{tmp}/r.html").read()
+    check(rc == 0 and "<script" not in html and "&lt;script&gt;alert(1)&lt;/script&gt;" in html, "report escapes captured markup, contains no script")
+    check("default-src 'none'" in html and "4 added · 0 removed · 1 changed" in html and "topsecret" in html, "report: CSP, diff summary, raw values")
+    rc, out = run("v8_diff_report", src, "1", "2", "--report", f"{tmp}/rr.html", "--redact")
+    html = open(f"{tmp}/rr.html").read()
+    check("topsecret" not in html and "sk-secret" not in html and "session=abc" not in html and "u2" not in html, "redacted report hides query, auth, cookie, diff values")
+    check("$.metadata.user_id" in html and "pattern-based" in html, "redacted report keeps paths and says redaction is pattern-based")
+
 
 VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7), ("v8", v8)]
 
