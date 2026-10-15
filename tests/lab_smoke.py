@@ -85,7 +85,43 @@ def v1(tmp, h1):
     check("#1 GET" in log, "console summary printed")
 
 
-VERSIONS = [("v1", v1)]
+def https_server(tmp):
+    """HTTPS test server whose certificate chains to tmp/up-ca.pem (created once)."""
+    import ssl
+    if not os.path.exists(f"{tmp}/server.pem"):
+        it.make_certs(tmp)
+    hs = http.server.ThreadingHTTPServer(("127.0.0.1", it.free_port()), it.Handler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(f"{tmp}/server.pem", f"{tmp}/server.key")
+    hs.socket = ctx.wrap_socket(hs.socket, server_side=True)
+    return it.serve(hs).server_address[1]
+
+
+def v2(tmp, h1):
+    print("v2_tls_recorder (passthrough)")
+    hs = https_server(tmp)
+    out = f"{tmp}/v2.jsonl"
+    proc = start("v2_tls_recorder", out)
+    try:
+        rc, body, err = it.curl("--http1.1", "--cacert", f"{tmp}/up-ca.pem", f"https://localhost:{hs}/hello", proxy=18082)
+        check(rc == 0 and body == b"hello world", f"HTTPS through passthrough tunnel {err.strip()}")
+        rc, body, _ = it.curl(f"http://127.0.0.1:{h1}/hello", proxy=18082)
+        check(rc == 0 and body == b"hello world", "plain HTTP still works")
+        time.sleep(0.3)
+    finally:
+        stop(proc)
+    flows = read_flows(out)
+    t = [f for f in flows if f["method"] == "CONNECT"]
+    check(len(t) == 1, "one CONNECT flow")
+    if t:
+        o = t[0]["observed"]
+        check(o["client"]["firstRecordName"] == "Handshake" and o["client"]["sni"] == "localhost", "ClientHello seen: Handshake record, SNI=localhost")
+        check(o["server"]["firstRecordType"] == 22, "server answers with a Handshake record")
+        check(t[0]["request"]["total"] > 0 and t[0]["response"]["total"] > len("hello world"), "encrypted byte counts recorded")
+        check(b"hello world" not in base64.b64decode(t[0]["response"]["base64"]), "tunnel bytes are ciphertext (plaintext body not visible)")
+
+
+VERSIONS = [("v1", v1), ("v2", v2)]
 
 
 def main():
