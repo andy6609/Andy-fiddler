@@ -11,19 +11,40 @@
    -> 두 끝점을 정렬해서 "작은쪽 | 큰쪽" 으로 key 를 만든다 (WireScope connectionKey() 와 같은 방식).
       v1 이 기록한 endpoints 와 같은 모양이라서, 프록시 Flow 와 패킷을 이 key 로 연결할 수 있다.
 
- [v5 단계 1 — 이 커밋]  연결 목록 + 핸드셰이크/종료 관찰
+ [v5 단계 1]  연결 목록 + 핸드셰이크/종료 관찰
      ./v5_tcp_stream capture.pcap
    연결마다: 패킷 수, 방향별 payload 바이트, 그리고 상태 변화
      SYN -> SYN+ACK -> ACK            (3-way handshake)
      FIN -> ACK / FIN -> ACK          (정상 종료, 양쪽이 각자 FIN)
      RST                              (강제 종료)
    캡처가 연결 '중간부터' 시작했으면 SYN 이 없다 -> "SYN 못 봄" 으로 그대로 표시.
+
+ [v5 단계 2]  한 연결의 바이트 흐름 복원
+     ./v5_tcp_stream capture.pcap 1          1번 연결, 텍스트
+     ./v5_tcp_stream capture.pcap 1 --hex    hexdump
+
+   방향마다:
+     1) 상대 순서번호: rel = seq - (ISN + 1).  SYN 이 1바이트를 '소비'하니까 +1.
+        (ISN 은 보안상 랜덤이라 절대값은 의미 없음. Wireshark 도 기본으로 상대값을 보여줌)
+     2) payload 있는 세그먼트를 rel 순서로 정렬
+     3) 앞에서부터 이어붙이며 '실제 캡처에서 일어난 일'을 그대로 표시:
+          - rel > 지금까지 끝  -> GAP (캡처가 놓친 바이트. 지어내서 채우지 않는다)
+          - 전부 이미 받은 범위 -> 재전송(retransmission)으로 보고 버림
+          - 일부만 겹침         -> 겹친 앞부분은 버리고 뒷부분만
+          - 도착 순서가 seq 순서와 다름 -> out of order 표시
+   ★ "캡처가 놓친 것"(GAP) 과 "네트워크에서 실제로 잃어버린 것" 은 다르다.
+      TCP 는 잃어버리면 재전송하니까, 받는 쪽 앱은 결국 다 받는다. GAP 은 '우리 캡처'의 구멍.
+
+ 한계: 순서번호 wrap(2^32) 은 차이 계산(int32)으로만 처리, SACK/window/zero-window 해석 안 함,
+       연결 재사용(같은 4-tuple 로 FIN 후 새 SYN) 을 별도 연결로 나누지 않음.
+       WireScope 본체 streamPreview() 도 같은 수준이며 화면에 "full reassembly 아님" 이라고 적어 둠.
 ============================================================
 */
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -197,10 +218,109 @@ static void printLifecycle(const Connection& c) {
     if (!c.sawSyn) printf("      (SYN 못 봄 — 캡처가 연결 도중에 시작됐거나 필터에 걸림)\n");
 }
 
+// ------------------------------------------------------------
+// 단계 2: 방향 하나의 바이트 흐름 복원
+// ------------------------------------------------------------
+struct Piece {
+    enum Kind { DATA, GAP, RETRANSMIT, OVERLAP } kind;
+    int64_t from, to;            // 상대 순서번호 [from, to)
+    size_t packet = 0;
+    std::string bytes;           // DATA/OVERLAP 일 때 실제 이어붙인 바이트
+    size_t arrivedBefore = 0;    // out of order: 이 세그먼트가 seq 상 앞선 #n 보다 먼저 도착
+};
+
+static std::vector<Piece> reassemble(const Connection& c, bool clientToServer) {
+    const std::string& from = clientToServer ? c.client : c.server;
+    bool baseSet = false;
+    uint32_t base = 0;
+    struct Item { int64_t rel; const Segment* seg; };
+    std::vector<Item> items;
+    for (auto& s : c.segs) {
+        if (s.src != from) continue;
+        if (!baseSet) { base = s.seq + ((s.flags & SYN) ? 1 : 0); baseSet = true; }   // SYN 없으면 첫 세그먼트 기준
+        if (s.payload.empty()) continue;
+        items.push_back({int64_t(int32_t(s.seq - base)), &s});                        // int32 차이 = wrap 한 번까지 안전
+    }
+    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.rel < b.rel; });
+
+    std::vector<Piece> out;
+    int64_t next = items.empty() ? 0 : std::min<int64_t>(0, items.front().rel);
+    size_t latestPacket = 0;                                       // seq 순서로 지나오면서 본 가장 늦은 패킷 번호
+    for (auto& it : items) {
+        const Segment& s = *it.seg;
+        int64_t start = it.rel, end = it.rel + int64_t(s.payload.size());
+        size_t outOfOrder = s.packet < latestPacket ? latestPacket : 0;
+        latestPacket = std::max(latestPacket, s.packet);
+        if (start > next) out.push_back({Piece::GAP, next, start});
+        if (end <= next) {
+            out.push_back({Piece::RETRANSMIT, start, end, s.packet});
+            continue;
+        }
+        size_t skip = size_t(std::max<int64_t>(0, next - start));
+        Piece p{skip ? Piece::OVERLAP : Piece::DATA, start + int64_t(skip), end, s.packet, s.payload.substr(skip)};
+        p.arrivedBefore = outOfOrder;
+        out.push_back(p);
+        next = end;
+    }
+    return out;
+}
+
+static void hexdump(const std::string& b, int64_t baseOffset) {
+    for (size_t row = 0; row < b.size(); row += 16) {
+        printf("      %08llx  ", (unsigned long long)(baseOffset + int64_t(row)));
+        for (size_t i = row; i < row + 16; i++) i < b.size() ? printf("%02x ", uint8_t(b[i])) : printf("   ");
+        printf(" ");
+        for (size_t i = row; i < row + 16 && i < b.size(); i++) putchar(uint8_t(b[i]) >= 32 && uint8_t(b[i]) < 127 ? b[i] : '.');
+        printf("\n");
+    }
+}
+
+static void printStream(const Connection& c, bool hex) {
+    for (bool c2s : {true, false}) {
+        auto pieces = reassemble(c, c2s);
+        uint64_t got = 0, missing = 0;
+        for (auto& p : pieces) {
+            if (p.kind == Piece::DATA || p.kind == Piece::OVERLAP) got += p.bytes.size();
+            if (p.kind == Piece::GAP) missing += uint64_t(p.to - p.from);
+        }
+        printf("\n%s  %s -> %s   %llu bytes reassembled, %llu bytes missing\n", c2s ? "C->S" : "S->C", (c2s ? c.client : c.server).c_str(),
+               (c2s ? c.server : c.client).c_str(), (unsigned long long)got, (unsigned long long)missing);
+        for (auto& p : pieces) {
+            switch (p.kind) {
+            case Piece::GAP:
+                printf("  [%lld..%lld)  GAP  %lld bytes not captured\n", (long long)p.from, (long long)p.to, (long long)(p.to - p.from));
+                break;
+            case Piece::RETRANSMIT:
+                printf("  [%lld..%lld)  #%zu retransmission (already have these bytes, dropped)\n", (long long)p.from, (long long)p.to, p.packet);
+                break;
+            default:
+                printf("  [%lld..%lld)  #%zu%s", (long long)p.from, (long long)p.to, p.packet, p.kind == Piece::OVERLAP ? "  overlap trimmed" : "");
+                if (p.arrivedBefore) printf("  out of order: arrived before #%zu", p.arrivedBefore);
+                printf("\n");
+            }
+        }
+        printf("  ---- %s ----\n", hex ? "hex" : "text");
+        for (auto& p : pieces) {
+            if (p.kind == Piece::GAP) printf(hex ? "      «%lld bytes missing»\n" : "«%lld bytes missing»", (long long)(p.to - p.from));
+            if (p.kind != Piece::DATA && p.kind != Piece::OVERLAP) continue;
+            if (hex) hexdump(p.bytes, p.from);
+            else fwrite(p.bytes.data(), 1, p.bytes.size(), stdout);
+        }
+        if (!hex) printf("\n");
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
-        printf("사용법: %s capture.pcap|pcapng\n", argv[0]);
+        printf("사용법: %s capture.pcap|pcapng [연결번호] [--hex]\n", argv[0]);
         return 1;
+    }
+    size_t pick = 0;
+    bool hex = false;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--hex") hex = true;
+        else pick = size_t(std::strtoul(a.c_str(), nullptr, 10));
     }
     std::ifstream in(argv[1], std::ios::binary);
     std::string file((std::istreambuf_iterator<char>(in)), {});
@@ -217,6 +337,14 @@ int main(int argc, char** argv) {
         if (toSegment(packets[i], i + 1, s)) segs.push_back(std::move(s));
     }
     auto conns = group(segs);
+    if (pick) {
+        if (pick > conns.size()) { printf("연결 %zu 없음 (전체 %zu개)\n", pick, conns.size()); return 1; }
+        auto& c = conns[pick - 1];
+        printf("[%zu] %s -> %s\n", pick, c.client.c_str(), c.server.c_str());
+        printLifecycle(c);
+        printStream(c, hex);
+        return 0;
+    }
     printf("%zu packets, %zu TCP segments, %zu connections\n\n", packets.size(), segs.size(), conns.size());
     for (size_t i = 0; i < conns.size(); i++) {
         auto& c = conns[i];
