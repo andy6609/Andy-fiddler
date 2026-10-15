@@ -12,6 +12,10 @@ import re
 import sys
 
 sys.dont_write_bytecode = True
+# The Windows runner's Python writes cp1252 by default; test output contains Korean, which would crash this script mid-way
+# (that silently dropped the "test #N output" annotations in earlier runs).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # MSVC / MSBuild:  C:\src\proxy.cpp(12,5): warning C4244: '=': conversion ... [C:\build\WireScope.vcxproj]
 #                  proxy.obj : error LNK2019: unresolved external symbol ...
