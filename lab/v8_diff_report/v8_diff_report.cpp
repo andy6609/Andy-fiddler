@@ -20,13 +20,26 @@
  ★ 정규화는 숨기지 않는다: --ignore 로 뺀 경로는 출력에 "ignored by ..." 로 꼭 표시.
    (user_id, 타임스탬프처럼 매번 다른 값 때문에 진짜 차이가 묻히는 걸 막으려고 빼는 거지, 몰래 빼는 게 아님)
 
- [v8 단계 1 — 이 커밋]
+ [v8 단계 1]
      ./v8_diff_report flows.jsonl                       기록 목록 (번호 = 줄 번호, v7 의 _id 와 같음)
      ./v8_diff_report flows.jsonl 3 5                   3번 vs 5번 요청 body
      ./v8_diff_report flows.jsonl 3 5 --part resHeaders --ignore "date,x-request-id"
        --part : reqBody(기본) | resBody | reqHeaders | resHeaders
        --ignore: 쉼표 구분, [*] = 아무 인덱스, * = 아무 키 한 칸.  예) messages[*].content
        --same  : 같은 경로도 출력
+
+ [v8 단계 2]  독립 HTML 보고서
+     ./v8_diff_report flows.jsonl 3 5 --report out.html [--redact]
+   서버 없이 파일 하나로 열리는 보고서: 기록 목록 + (A,B 를 줬으면) 비교 결과 + 기록별 헤더/body.
+   이 버전은 C++ 이 HTML 을 '다 그려서' 쓴다 — JavaScript 0줄.
+     장점: 받는 사람 브라우저에서 아무 코드도 안 돈다 (CSP 로 스크립트 전면 차단).
+     단점: 정적이라 검색/필터/다른 쌍 비교가 안 된다.
+   WireScope 본체는 반대로 '데이터 + 뷰어 JS' 를 한 파일에 넣어서 보고서 안에서도 탐색/비교가 된다.
+   (둘 다 장단점이 있고, 사용자가 원한 건 '탐색 가능한 독립 HTML' 이라 본체는 후자를 택함)
+
+   --redact (공유용): 본문 제거, authorization/cookie/api-key 류 헤더 값 가림, query string 가림,
+                      비교표의 값도 가림 (경로와 종류만 남김). '패턴 기반'이라 완벽하지 않음을 보고서에 적어 둔다.
+   ★ HTML 에 넣는 모든 캡처 값은 escape. 캡처한 응답이 <script> 를 담고 있어도 글자로만 보이게.
 ============================================================
 */
 
@@ -35,6 +48,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <ctime>
 #include <fstream>
 #include <map>
 #include <regex>
@@ -236,6 +250,152 @@ static void printDiff(const Diff& d, const std::vector<IgnoreRule>& rules) {
 }
 
 
+// ------------------------------------------------------------
+// 단계 2: 정적 HTML 보고서
+// ------------------------------------------------------------
+static std::string esc(const std::string& s) {
+    std::string o;
+    for (char c : s) {
+        switch (c) {
+        case '&': o += "&amp;"; break;
+        case '<': o += "&lt;"; break;
+        case '>': o += "&gt;"; break;
+        case '"': o += "&quot;"; break;
+        case '\'': o += "&#39;"; break;
+        default: o += c;
+        }
+    }
+    return o;
+}
+
+// UTF-8 로 읽을 수 있는 텍스트인가 (아니면 hex 로 보여줌)
+static bool isText(const std::string& s) {
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = uint8_t(s[i]);
+        if (c < 0x80) {
+            if (c < 9 || (c > 13 && c < 32)) return false;
+            i++;
+            continue;
+        }
+        int n = (c >> 5) == 6 ? 1 : (c >> 4) == 14 ? 2 : (c >> 3) == 30 ? 3 : -1;
+        if (n < 0 || i + size_t(n) >= s.size()) return false;           // 뒤따를 바이트가 모자람 (잘린 body 끝일 수도)
+        for (int k = 1; k <= n; k++)
+            if ((uint8_t(s[i + size_t(k)]) >> 6) != 2) return false;   // 이어지는 바이트는 10xxxxxx
+        i += size_t(n) + 1;
+    }
+    return true;
+}
+static std::string hexPreview(const std::string& s, size_t limit) {
+    std::string o;
+    char b[4];
+    for (size_t i = 0; i < std::min(s.size(), limit); i++) {
+        snprintf(b, sizeof(b), "%02x", uint8_t(s[i]));
+        o += b;
+        o += (i % 16 == 15) ? '\n' : ' ';
+    }
+    if (s.size() > limit) o += "\n… " + std::to_string(s.size() - limit) + " more bytes";
+    return o;
+}
+
+static const char* SECRET_HEADERS[] = {"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "api-key", "x-goog-api-key"};
+static bool isSecretHeader(std::string k) {
+    std::transform(k.begin(), k.end(), k.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    for (auto* s : SECRET_HEADERS)
+        if (k == s) return true;
+    return false;
+}
+static json redactRecord(json r) {
+    for (auto key : {"requestHeaders", "responseHeaders", "responseTrailers"})
+        if (r.contains(key) && r[key].is_array())
+            for (auto& h : r[key])
+                if (h.is_array() && h.size() == 2 && isSecretHeader(h[0].get<std::string>())) h[1] = "[redacted]";
+    for (auto side : {"request", "response"})
+        if (r.contains(side) && r[side].is_object()) { r[side]["base64"] = ""; r[side]["redacted"] = true; }
+    if (r.contains("path") && r["path"].is_string()) {
+        std::string p = r["path"];
+        size_t q = p.find('?');
+        if (q != std::string::npos) r["path"] = p.substr(0, q) + "?[redacted]";
+    }
+    return r;
+}
+
+static std::string headersHtml(const json& hs) {
+    if (!hs.is_array() || hs.empty()) return "<p class=m>none</p>";
+    std::string o = "<table>";
+    for (auto& h : hs)
+        if (h.is_array() && h.size() == 2) o += "<tr><th>" + esc(h[0].get<std::string>()) + "</th><td>" + esc(h[1].is_string() ? h[1].get<std::string>() : h[1].dump()) + "</td></tr>";
+    return o + "</table>";
+}
+static std::string bodyHtml(const json& b) {
+    if (!b.is_object()) return "";
+    std::string info = std::to_string(b.value("captured", 0)) + " of " + std::to_string(b.value("total", 0)) + " bytes captured";
+    if (b.value("redacted", false)) return "<p class=m>" + info + " — body removed (redacted)</p>";
+    std::string bytes = unbase64(b.value("base64", ""));
+    if (bytes.empty()) return "<p class=m>" + info + "</p>";
+    return "<p class=m>" + info + (b.value("truncated", false) ? " (truncated)" : "") + "</p><pre>" +
+           esc(isText(bytes) ? cut(bytes, 200000) : hexPreview(bytes, 512)) + "</pre>";
+}
+
+static bool writeReport(const std::string& out, const std::string& source, const std::vector<json>& records, const json* A, const json* B,
+                        size_t ia, size_t ib, const Diff* diff, const std::vector<IgnoreRule>& rules, const std::string& part, bool redact) {
+    char when[64];
+    time_t now = time(nullptr);
+    strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", localtime(&now));
+    std::string h = R"(<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>WireScope lab v8 report</title><style>
+body{font:13px system-ui,sans-serif;margin:24px;color:#233445}h1{font-size:18px}h2{font-size:15px;margin-top:28px}
+table{border-collapse:collapse;margin:6px 0}td,th{border-bottom:1px solid #e3e8ee;padding:4px 8px;text-align:left;font:12px monospace;vertical-align:top}
+th{color:#6d7e8f;font-weight:500}pre{background:#f6f8fa;padding:8px;white-space:pre-wrap;word-break:break-all;font-size:12px}
+.m{color:#6d7e8f}.added{background:#e3f3e9}.removed{background:#fbe6e8}.changed{background:#fff0d6}.note{background:#fff9ec;padding:8px;border:1px solid #e2d4b7}
+details{border-top:1px solid #e3e8ee;padding:6px 0}summary{cursor:pointer;font:12px monospace}
+</style></head><body>)";
+    h += "<h1>WireScope lab v8 report</h1><p class=m>source " + esc(source) + " · generated " + when + " · " + std::to_string(records.size()) + " records</p>";
+    if (redact)
+        h += "<p class=note>Redacted: bodies removed, authorization/cookie/API-key header values and query strings replaced, "
+             "comparison values hidden. Redaction is pattern-based — paths, other headers and notes are kept. Check before sharing.</p>";
+
+    if (diff) {
+        h += "<h2>Compare #" + std::to_string(ia) + " → #" + std::to_string(ib) + " (" + esc(part) + ")</h2>";
+        h += "<p>A = " + esc(describe(*A, ia)) + "<br>B = " + esc(describe(*B, ib)) + "</p>";
+        for (auto& n : diff->notes) h += "<p class=note>" + esc(n) + "</p>";
+        h += "<p>" + std::to_string(diff->counts.at("added")) + " added · " + std::to_string(diff->counts.at("removed")) + " removed · " +
+             std::to_string(diff->counts.at("changed")) + " changed · " + std::to_string(diff->counts.at("same")) + " unchanged";
+        if (diff->counts.at("ignored")) {
+            h += " · " + std::to_string(diff->counts.at("ignored")) + " ignored by:";
+            for (auto& r : rules) h += " <code>" + esc(r.label) + "</code>";
+        }
+        h += " <span class=m>(leaf paths, arrays by index)</span></p><table><tr><th>change</th><th>path</th><th>A</th><th>B</th></tr>";
+        for (auto& r : diff->rows)
+            h += "<tr class=" + r.kind + "><td>" + r.kind + "</td><td>" + esc(r.path) + "</td><td>" + (redact ? "[redacted]" : esc(cut(r.a, 2000))) +
+                 "</td><td>" + (redact ? "[redacted]" : esc(cut(r.b, 2000))) + "</td></tr>";
+        h += "</table>";
+    }
+
+    h += "<h2>Records</h2><table><tr><th>#</th><th>method</th><th>host</th><th>path</th><th>status</th><th>req bytes</th><th>res bytes</th></tr>";
+    for (size_t i = 0; i < records.size(); i++) {
+        if (records[i].is_discarded()) continue;
+        json r = redact ? redactRecord(records[i]) : records[i];
+        h += "<tr><td>" + std::to_string(i + 1) + "</td><td>" + esc(r.value("method", r.value("kind", std::string("")))) + "</td><td>" +
+             esc(r.value("host", std::string(""))) + "</td><td>" + esc(r.value("path", std::string(""))) + "</td><td>" +
+             esc(r.contains("status") ? r["status"].dump() : "") + "</td><td>" + std::to_string(r.value("request", json::object()).value("total", 0)) +
+             "</td><td>" + std::to_string(r.value("response", json::object()).value("total", 0)) + "</td></tr>";
+    }
+    h += "</table>";
+    for (size_t i = 0; i < records.size(); i++) {
+        if (records[i].is_discarded()) continue;
+        json r = redact ? redactRecord(records[i]) : records[i];
+        h += "<details><summary>" + esc(describe(r, i + 1)) + "</summary><h3>request headers</h3>" + headersHtml(r.value("requestHeaders", json::array())) +
+             "<h3>request body</h3>" + bodyHtml(r.value("request", json::object())) + "<h3>response headers</h3>" +
+             headersHtml(r.value("responseHeaders", json::array())) + "<h3>response body</h3>" + bodyHtml(r.value("response", json::object())) + "</details>";
+    }
+    h += "</body></html>\n";
+    std::ofstream f(out, std::ios::binary);
+    f << h;
+    return bool(f);
+}
+
+
 static std::vector<json> readJsonl(const std::string& path) {
     std::ifstream in(path);
     std::vector<json> out;
@@ -251,16 +411,23 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::vector<size_t> ids;
-    std::string part = "reqBody", ignore;
-    bool same = false;
+    std::string part = "reqBody", ignore, report;
+    bool same = false, redact = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--part" && i + 1 < argc) part = argv[++i];
         else if (a == "--ignore" && i + 1 < argc) ignore = argv[++i];
         else if (a == "--same") same = true;
+        else if (a == "--report" && i + 1 < argc) report = argv[++i];
+        else if (a == "--redact") redact = true;
         else ids.push_back(std::strtoul(a.c_str(), nullptr, 10));
     }
     auto records = readJsonl(argv[1]);
+    if (!report.empty() && ids.size() < 2) {                       // 비교 없이 목록만 보고서로
+        if (!writeReport(report, argv[1], records, nullptr, nullptr, 0, 0, nullptr, {}, part, redact)) return 1;
+        printf("보고서: %s\n", report.c_str());
+        return 0;
+    }
     if (ids.size() < 2) {
         for (size_t i = 0; i < records.size(); i++)
             if (!records[i].is_discarded()) printf("%s\n", describe(records[i], i + 1).c_str());
@@ -277,6 +444,13 @@ int main(int argc, char** argv) {
     Side sa = extract(A, part), sb = extract(B, part);
     if (!sa.note.empty()) printf("  A: %s\n", sa.note.c_str());
     if (!sb.note.empty()) printf("  B: %s\n", sb.note.c_str());
-    printDiff(compare(sa, sb, rules, same), rules);
+    Diff diff = compare(sa, sb, rules, same);
+    if (!sa.note.empty()) diff.notes.insert(diff.notes.begin(), "A: " + sa.note);
+    if (!sb.note.empty()) diff.notes.insert(diff.notes.begin(), "B: " + sb.note);
+    printDiff(diff, rules);
+    if (!report.empty()) {
+        if (!writeReport(report, argv[1], records, &A, &B, ids[0], ids[1], &diff, rules, part, redact)) return 1;
+        printf("\n보고서: %s%s\n", report.c_str(), redact ? " (redacted)" : "");
+    }
     return 0;
 }
