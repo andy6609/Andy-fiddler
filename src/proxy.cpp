@@ -1,4 +1,5 @@
 #include "net.hpp"
+#include "process.hpp"
 #include <algorithm>
 #include <charconv>
 #include <thread>
@@ -53,10 +54,12 @@ getsockopt(s,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&e),&n);ok=e==0;break;}
     }
     void serve(sock_t socket){Channel client,up;client.socket=socket;socketTimeout(socket,60);uint64_t active=0;std::string conn="tcp-"+randomHex(8);int64_t started=nowMs();
         struct Cleanup{Impl* p;sock_t s;~Cleanup(){std::lock_guard lock(p->mutex);p->sockets.erase(s);}} cleanup{this,socket};
+        // Who opened this connection: looked up before the first read, while the app's socket is surely still in the TCP table (Windows only; null elsewhere).
+        const json process=processForConnection(socketAddress(socket,true),socketAddress(socket,false));auto attributed=[&](json meta){if(!process.is_null())meta["process"]=process;return meta;};
         try{Head head;if(!readHead(client,head))return;std::string tunnelHost;uint16_t tunnelPort=443;bool secure=false;
             if(head.line.starts_with("CONNECT ")){
                 auto space=head.line.find(' ',8);if(space==std::string::npos)throw std::runtime_error("Invalid CONNECT");auto [host,port]=authority(head.line.substr(8,space-8),443);tunnelHost=host;tunnelPort=port;
-                active=store.createFlow({{"method","CONNECT"},{"host",host},{"port",port},{"path",endpoint(host,port)},{"protocol","Tunnel"},{"connection",conn}},head.headers);
+                active=store.createFlow(attributed({{"method","CONNECT"},{"host",host},{"port",port},{"path",endpoint(host,port)},{"protocol","Tunnel"},{"connection",conn}}),head.headers);
                 connect(up,socket,host,port);store.edit(active,[&](Flow& f){f.meta["packetKeys"]=keys(client,up);});client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
                 if(!mitm){store.edit(active,[](Flow& f){f.meta["status"]=200;f.meta["state"]="streaming";f.meta["encrypted"]=true;});tunnel(client,up,active);store.edit(active,[&](Flow& f){f.meta["state"]="complete";f.meta["duration"]=nowMs()-started;});return;}
                 if(!client.buffer.empty())throw std::runtime_error("Pipelined TLS handshake is not supported");
@@ -66,13 +69,13 @@ getsockopt(s,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&e),&n);ok=e==0;break;}
                 if(numeric)X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(up.ssl),host.c_str());else SSL_set1_host(up.ssl,host.c_str());
                 static const unsigned char h2alpn[]={2,'h','2'}, h1alpn[]={8,'h','t','t','p','/','1','.','1'};SSL_set_alpn_protos(up.ssl,h2?h2alpn:h1alpn,h2?sizeof(h2alpn):sizeof(h1alpn));if(SSL_connect(up.ssl)!=1)throw std::runtime_error("Upstream TLS verification: "+tlsError());const unsigned char* selected=nullptr;unsigned selectedLen=0;SSL_get0_alpn_selected(up.ssl,&selected,&selectedLen);if(h2&&(selectedLen!=2||std::string(reinterpret_cast<const char*>(selected),2)!="h2"))throw std::runtime_error("Upstream did not negotiate h2; no HTTP/2-to-HTTP/1 translation");
                 store.edit(active,[&](Flow& f){f.meta["status"]=200;f.meta["state"]="complete";f.meta["duration"]=nowMs()-started;f.meta["tls"]=SSL_get_version(client.ssl);f.meta["cipher"]=SSL_get_cipher(client.ssl);f.meta["alpn"]=h2?"h2":"http/1.1";f.timeline.push_back({{"time",nowMs()},{"event","tls.established"}});});active=0;
-                if(h2){http2(store,client,up,tunnelHost,tunnelPort,conn,keys(client,up),running);return;}secure=true;if(!readHead(client,head))return;
+                if(h2){http2(store,client,up,tunnelHost,tunnelPort,conn,keys(client,up),process,running);return;}secure=true;if(!readHead(client,head))return;
             }
             std::string connectedHost=secure?tunnelHost:"";uint16_t connectedPort=secure?tunnelPort:0;
             do{if(!running)break;started=nowMs();auto s1=head.line.find(' '),s2=head.line.find(' ',s1==std::string::npos?0:s1+1);if(s1==std::string::npos||s2==std::string::npos)throw std::runtime_error("Invalid request line");std::string method=head.line.substr(0,s1),path=head.line.substr(s1+1,s2-s1-1);if(head.line.substr(s2+1)!="HTTP/1.1"&&head.line.substr(s2+1)!="HTTP/1.0")throw std::runtime_error("Unsupported HTTP version");auto [host,port]=authority(header(head.headers,"host"),secure?443:80);
                 if(path.starts_with("http://")){if(secure)throw std::runtime_error("Absolute HTTP target inside TLS tunnel");auto end=path.find_first_of("/?",7);auto hp=authority(path.substr(7,end==std::string::npos?end:end-7),80);host=hp.first;port=hp.second;path=end==std::string::npos?"/":path.substr(end);if(path.front()=='?')path="/"+path;eraseHeader(head.headers,"host");head.headers.emplace_back("Host",endpoint(host,port));}
                 if(path.empty()||(path[0]!='/'&&path!="*"))throw std::runtime_error("Invalid request target");if(secure&&(lower(host)!=lower(tunnelHost)||port!=tunnelPort))throw std::runtime_error("Host differs from CONNECT authority");
-                active=store.createFlow({{"method",method},{"host",host},{"port",port},{"path",path},{"protocol",head.line.substr(s2+1)},{"connection",conn},{"tls",secure?SSL_get_version(client.ssl):""}},head.headers);
+                active=store.createFlow(attributed({{"method",method},{"host",host},{"port",port},{"path",path},{"protocol",head.line.substr(s2+1)},{"connection",conn},{"tls",secure?SSL_get_version(client.ssl):""}}),head.headers);
                 if(host!=connectedHost||port!=connectedPort||up.socket==bad_socket){connect(up,socket,host,port);connectedHost=host;connectedPort=port;}
                 store.edit(active,[&](Flow& f){f.meta["packetKeys"]=keys(client,up);});auto requestFrame=framing(head.headers,false,false);
                 if(lower(header(head.headers,"expect"))=="100-continue"){client.write("HTTP/1.1 100 Continue\r\n\r\n");eraseHeader(head.headers,"expect");}
@@ -83,7 +86,7 @@ getsockopt(s,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&e),&n);ok=e==0;break;}
                 store.edit(active,[&](Flow& f){f.meta["duration"]=nowMs()-started;f.meta["state"]=running?"complete":"interrupted";f.timeline.push_back({{"time",nowMs()},{"event","response.end"}});});active=0;
                 if(status==101||rf.mode==Framing::Close||lower(header(head.headers,"connection"))=="close"||lower(header(response.headers,"connection"))=="close"||head.line.ends_with("HTTP/1.0"))break;
             }while(readHead(client,head));
-        }catch(const std::exception& e){if(!active)active=store.createFlow({{"method","—"},{"host",socketAddress(socket,true)},{"path",""},{"protocol","Connection"},{"connection",conn}});store.edit(active,[&](Flow& f){f.meta["state"]="error";f.meta["error"]=e.what();f.meta["duration"]=nowMs()-started;f.timeline.push_back({{"time",nowMs()},{"event","connection.error"}});});}
+        }catch(const std::exception& e){if(!active)active=store.createFlow(attributed({{"method","—"},{"host",socketAddress(socket,true)},{"path",""},{"protocol","Connection"},{"connection",conn}}));store.edit(active,[&](Flow& f){f.meta["state"]="error";f.meta["error"]=e.what();f.meta["duration"]=nowMs()-started;f.timeline.push_back({{"time",nowMs()},{"event","connection.error"}});});}
     }
 };
 Proxy::Proxy(Store& s,Tls& t):impl_(std::make_unique<Impl>(s,t)){}

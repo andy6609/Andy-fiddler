@@ -76,5 +76,5 @@ public:
 private:
     struct Impl;std::unique_ptr<Impl> impl_;
 };
-void http2(Store&,Channel&,Channel&,const std::string& host,uint16_t port,const std::string& connection,const json& keys,std::atomic<bool>& running);
+void http2(Store&,Channel&,Channel&,const std::string& host,uint16_t port,const std::string& connection,const json& keys,const json& process,std::atomic<bool>& running);
 }

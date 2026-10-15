@@ -29,8 +29,11 @@ std::string connectionKey(std::string a,std::string b) { if(a>b) std::swap(a,b);
 std::string endpoint(const std::string& a,uint16_t p) { return (a.find(':')!=std::string::npos?"["+a+"]":a)+":"+std::to_string(p); }
 void Body::append(const char* p,size_t n) { total+=n; if(bytes.size()<BODY_LIMIT) bytes.append(p,std::min(n,BODY_LIMIT-bytes.size())); }
 json Body::serialize() const { return {{"base64",base64(bytes)},{"captured",bytes.size()},{"total",total},{"truncated",total>bytes.size()},{"sha256",total==bytes.size()?sha256(bytes):""}}; }
-json Flow::summary() const { json j=meta; j["requestBytes"]=request.total; j["responseBytes"]=response.total; j["truncated"]=request.total>request.bytes.size()||response.total>response.bytes.size(); j["notes"]=notes; return j; }
-json Flow::detail() const { json j=summary(); j["request"]={{"headers",requestHeaders},{"body",request.serialize()}}; j["response"]={{"headers",responseHeaders},{"body",response.serialize()}}; j["timeline"]=timeline; j["messages"]=messages; return j; }
+json Flow::summary() const { json j=meta;
+    // The polled list only needs who sent it; path/commandLine/parent stay in detail().
+    if(auto p=meta.find("process");p!=meta.end()&&p->is_object()){json slim=json::object();for(auto k:{"pid","name","error"})if(p->contains(k))slim[k]=(*p)[k];j["process"]=slim;}
+    j["requestBytes"]=request.total; j["responseBytes"]=response.total; j["truncated"]=request.total>request.bytes.size()||response.total>response.bytes.size(); j["notes"]=notes; return j; }
+json Flow::detail() const { json j=summary(); if(meta.contains("process")) j["process"]=meta["process"]; j["request"]={{"headers",requestHeaders},{"body",request.serialize()}}; j["response"]={{"headers",responseHeaders},{"body",response.serialize()}}; j["timeline"]=timeline; j["messages"]=messages; return j; }
 json Packet::summary() const { json j=info; j["id"]=id; j["time"]=time; j["length"]=originalLength; j["captured"]=raw.size(); j["linkType"]=linkType; j["device"]=device; return j; }
 json Packet::detail() const { json j=summary(); j["base64"]=base64(raw); return j; }
 uint64_t Store::createFlow(json m,Headers hs) {
@@ -85,6 +88,8 @@ json redactedArchive(json j) {
             for(auto& h:f[side]["headers"]) { auto key=lower(h[0].get<std::string>()); if(key=="authorization"||key=="proxy-authorization"||key=="cookie"||key=="set-cookie"||key=="x-api-key"||key=="location"||key=="x-goog-upload-url") h[1]="[redacted]"; }
             f[side]["body"]["base64"]=""; f[side]["body"]["captured"]=0; f[side]["body"]["sha256"]=""; f[side]["body"]["redacted"]=true;
         }
+        // Process path and command line can carry user names, project paths and tokens passed as arguments.
+        if(f.contains("process")&&f["process"].is_object()) for(auto k:{"path","commandLine"}) if(f["process"].contains(k)) f["process"][k]="[redacted]";
         std::string path=f.value("path",""); auto q=path.find('?'); if(q!=std::string::npos) f["path"]=path.substr(0,q)+"?[redacted]";
         f["messages"]=json::array();
     }
