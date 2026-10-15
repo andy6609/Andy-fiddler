@@ -334,6 +334,14 @@ def v5(tmp, h1):
     check(life == ["SYN", "SYN+ACK", "FIN+ACK", "FIN+ACK"], f"handshake and teardown in order: {life}")
     rc, out = run("v5_tcp_stream", f"{tmp}/mixed.pcap")
     check(rc == 0 and "(SYN" not in out and "1 connections" in out, "UDP ignored, SYN seen in synthetic capture")
+    rc, out = run("v5_tcp_stream", path, "1")
+    check(request.decode() in out, "out-of-order client segments put back in order")
+    check("#4  out of order: arrived before #5" in out, "out-of-order arrival reported")
+    check("#7 retransmission" in out, "retransmitted server segment detected and dropped")
+    check(f"GAP  {len(r2)} bytes not captured" in out and f"«{len(r2)} bytes missing»hello" in out, "missing bytes shown as a gap, not invented")
+    check(f"{len(r1) + len(r3)} bytes reassembled, {len(r2)} bytes missing" in out, "per-direction totals")
+    rc, out = run("v5_tcp_stream", path, "1", "--hex")
+    check("47 45 54 20 2f 69 6e 64" in out, "hex view of the request")
     return path, request, (r1, r2, r3)
 
 
