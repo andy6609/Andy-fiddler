@@ -92,7 +92,7 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 
 | 파일 | 내용 | 검증 |
 |---|---|---|
-| `CMakeLists.txt` | C++20, OpenSSL, nghttp2, Threads, Windows 링크, 비Windows libpcap, 매 빌드마다 웹 자산 복사, CTest(core + integration) | macOS 클린 빌드 경고 0 |
+| `CMakeLists.txt` | C++17, OpenSSL, nghttp2, Threads, Windows 링크, 비Windows libpcap, 매 빌드마다 웹 자산 복사, CTest(core + integration) | macOS 클린 빌드 경고 0 |
 | `src/core.hpp/.cpp` | Flow/Packet/Store, body 1 MiB 캡, base64/SHA256, 세션 저장·복원(검증 후 교체), redact, HTML 보고서, 합성 sample | 단위 테스트 |
 | `src/packet.hpp/.cpp` | Ethernet/VLAN/IP/TCP/UDP/DNS/TLS 필드와 offset, pcap/pcapng 읽기·쓰기, TCP preview | 단위 테스트(경계·잘림·DNS 포인터 루프·패딩) |
 | `src/capture.cpp` | Windows Npcap 동적 로드, 인터페이스/BPF/캡처 스레드/통계 | macOS libpcap 경로는 인터페이스 목록만 확인(BPF 권한 없음). **Windows 미검증** |

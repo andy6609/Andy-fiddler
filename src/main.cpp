@@ -54,7 +54,7 @@ int main(int argc,char** argv){try{
     httplib::Server server;server.new_task_queue=[](){return new httplib::ThreadPool(6);};server.set_payload_max_length(192*1024*1024);server.set_read_timeout(15);server.set_write_timeout(30);
     server.set_pre_routing_handler([&](const httplib::Request& r,httplib::Response& res){
         auto host=r.get_header_value("Host");if(host!="127.0.0.1:"+std::to_string(port)&&host!="localhost:"+std::to_string(port)){res.status=403;output(res,{{"error","Invalid Host"}});return httplib::Server::HandlerResponse::Handled;}
-        if(r.path.starts_with("/api/")&&r.path!="/api/bootstrap"&&r.get_header_value("X-WireScope-Token")!=token){res.status=403;output(res,{{"error","Session token required"}});return httplib::Server::HandlerResponse::Handled;}
+        if(startsWith(r.path,"/api/")&&r.path!="/api/bootstrap"&&r.get_header_value("X-WireScope-Token")!=token){res.status=403;output(res,{{"error","Session token required"}});return httplib::Server::HandlerResponse::Handled;}
         auto from=r.get_header_value("Origin");if(!from.empty()&&from!=origin&&from!="http://localhost:"+std::to_string(port)){res.status=403;output(res,{{"error","Cross-origin request blocked"}});return httplib::Server::HandlerResponse::Handled;}
         return httplib::Server::HandlerResponse::Unhandled;
     });

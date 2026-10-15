@@ -71,7 +71,7 @@ void packets() {
     CHECK_EQ(p.info["dstPort"].get<int>(), 80);
     CHECK_EQ(p.info["source"].get<std::string>(), "10.0.0.1:51000"s);
     CHECK_EQ(p.info["payloadOffset"].get<size_t>(), size_t(54));
-    CHECK(p.info["summary"].get<std::string>().starts_with("GET / HTTP/1.1"));
+    CHECK(startsWith(p.info["summary"].get<std::string>(),"GET / HTTP/1.1"));
     CHECK(!p.info.contains("error"));
     // Every reported field must point at the bytes it describes.
     bool sawSource = false;

@@ -8,6 +8,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ws {
@@ -26,8 +27,11 @@ std::string randomHex(size_t n = 16);
 std::string safeJson(const json&);
 std::string connectionKey(std::string a, std::string b);
 std::string endpoint(const std::string& address, uint16_t port);
-// UTF-8 string -> path without the C++20-deprecated u8path (matters for Windows profile paths).
-inline std::filesystem::path utf8Path(const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); }
+// UTF-8 string -> path. Plain path(std::string) would use the ANSI code page on Windows and mangle Korean profile paths.
+inline std::filesystem::path utf8Path(const std::string& s) { return std::filesystem::u8path(s); }
+// C++17 std::string has no starts_with/ends_with.
+inline bool startsWith(std::string_view s, std::string_view prefix) { return s.substr(0, prefix.size()) == prefix; }
+inline bool endsWith(std::string_view s, std::string_view suffix) { return s.size() >= suffix.size() && s.substr(s.size() - suffix.size()) == suffix; }
 struct Body {
     std::string bytes;
     uint64_t total = 0;

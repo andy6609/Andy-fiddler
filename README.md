@@ -2,7 +2,7 @@
 
 **Follow one HTTP request all the way down to the bytes on the wire.**
 
-WireScope is a traffic inspector I'm building in C++20. You pick a request the proxy recorded, and from there you can keep going down: the TCP connection it used, the IP packets that made up that connection, and the exact byte offset of every header field.
+WireScope is a traffic inspector I'm building in C++17. You pick a request the proxy recorded, and from there you can keep going down: the TCP connection it used, the IP packets that made up that connection, and the exact byte offset of every header field.
 
 ![Request inspector](docs/images/inspector-request.png)
 
@@ -93,7 +93,7 @@ The full breakdown is in [docs/COVERAGE.md](docs/COVERAGE.md) (in Korean for now
 
 ## Build and run
 
-You need CMake ≥ 3.20, a C++20 compiler, OpenSSL 3 and nghttp2. Live capture on Windows needs [Npcap](https://npcap.com/) installed with loopback support.
+You need CMake ≥ 3.20, a C++17 compiler, OpenSSL 3 and nghttp2. Live capture on Windows needs [Npcap](https://npcap.com/) installed with loopback support.
 
 ```sh
 # macOS with Homebrew
@@ -152,4 +152,4 @@ If you want to read the code, this order works:
 6. `web/app.js`: the inspector UI, shared by live mode and offline reports
 7. `tests/`: `core_tests.cpp`, `integration_test.py`, `lab_smoke.py`
 
-Built with C++20, OpenSSL, nghttp2, libpcap/Npcap, cpp-httplib, nlohmann/json, plain JavaScript (no framework), and CMake/CTest.
+Built with C++17, OpenSSL, nghttp2, libpcap/Npcap, cpp-httplib, nlohmann/json, plain JavaScript (no framework), and CMake/CTest.
