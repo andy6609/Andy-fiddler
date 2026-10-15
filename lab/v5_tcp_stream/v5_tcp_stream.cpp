@@ -51,6 +51,11 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#endif
 
 // ------------------------------------------------------------
 // 파일 읽기 + TCP 까지만 해석 (v4 에서 필요한 부분만 가져옴)
@@ -311,6 +316,12 @@ static void printStream(const Connection& c, bool hex) {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // Windows 함정: CRT 의 stdout 은 기본이 '텍스트 모드'라서 \n 을 \r\n 으로 바꿔 내보낸다.
+    //   복원한 HTTP 바이트의 \r\n 이 \r\r\n 이 되어 "원본 그대로" 가 깨진다 -> 바이너리 모드로.
+    _setmode(_fileno(stdout), _O_BINARY);
+    SetConsoleOutputCP(CP_UTF8);
+#endif
     if (argc < 2) {
         printf("사용법: %s capture.pcap|pcapng [연결번호] [--hex]\n", argv[0]);
         return 1;
