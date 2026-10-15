@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "wirescope",
+  "version-string": "0.1.0",
+  "description": "Windows network inspector: explicit proxy + Npcap capture, raw evidence in a local browser UI",
+  "dependencies": [
+    "openssl",
+    "nghttp2"
+  ]
+}

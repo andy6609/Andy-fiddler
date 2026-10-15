@@ -1,0 +1,36 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows-msvc",
+      "displayName": "Windows x64 · MSVC + vcpkg",
+      "description": "Visual Studio generator (newest installed), x64, dependencies from vcpkg.json via $env{VCPKG_ROOT}",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build-windows",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "X_VCPKG_APPLOCAL_DEPS_INSTALL": "ON"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "macos",
+      "displayName": "macOS development host · Homebrew",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/openssl;/opt/homebrew/opt/libnghttp2"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-release", "configurePreset": "windows-msvc", "configuration": "Release" },
+    { "name": "macos", "configurePreset": "macos" }
+  ],
+  "testPresets": [
+    { "name": "windows-release", "configurePreset": "windows-msvc", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "macos", "configurePreset": "macos", "output": { "outputOnFailure": true } }
+  ]
+}
