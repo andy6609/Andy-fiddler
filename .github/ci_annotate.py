@@ -78,18 +78,23 @@ def test(log):
         m = re.match(r"^(\d+): (.*)$", raw)
         if not m:
             continue
-        c = per.setdefault(m[1], {"ok": 0, "fail": 0, "lines": [], "checks": ""})
+        c = per.setdefault(m[1], {"ok": 0, "fail": 0, "lines": [], "checks": "", "info": []})
         text = m[2]
         if text.startswith("  ok "):
             c["ok"] += 1
         elif text.startswith("  FAIL"):
             c["fail"] += 1
             fails.append(text.strip())
+        elif text.startswith("  info "):
+            c["info"].append(text.strip()[5:])  # raw values the tests print (PIDs, registry values, recorded errors)
         elif re.match(r"^\d+ checks, \d+ failures", text):
             c["checks"] = text.strip()
         c["lines"].append(text)
     counts = [f"#{n}: " + (c["checks"] or f"{c['ok']} ok, {c['fail']} FAIL") for n, c in sorted(per.items(), key=lambda x: int(x[0]))]
     emit("notice", "ctest", summary + counts)
+    for n, c in sorted(per.items(), key=lambda x: int(x[0])):
+        if c["info"]:
+            emit("notice", f"test #{n} info", c["info"], limit=30)
     if fails:
         emit("error", f"Failing checks ({len(fails)})", fails)
     for n, c in per.items():
