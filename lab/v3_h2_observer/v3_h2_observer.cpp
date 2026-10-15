@@ -170,10 +170,15 @@ static bool makeCa(const std::string& pemPath) {
     addExt(c, c, NID_subject_key_identifier, "hash");
     X509_sign(c, g_certs.caKey, EVP_sha256());
     g_certs.caCert = c;
-    FILE* f = fopen(pemPath.c_str(), "wb");
-    if (!f) return false;
-    PEM_write_X509(f, c);
-    fclose(f);
+    // FILE* 를 OpenSSL DLL 에 넘기지 않는다 (Windows 의 OPENSSL_Applink 중단, v2 주석 참고) -> 메모리 BIO + C++ 스트림
+    BIO* mem = BIO_new(BIO_s_mem());
+    PEM_write_bio_X509(mem, c);
+    char* pemData = nullptr;
+    long pemSize = BIO_get_mem_data(mem, &pemData);
+    std::ofstream pemFile(pemPath, std::ios::binary);
+    pemFile.write(pemData, pemSize);
+    BIO_free(mem);
+    if (!pemFile) return false;
     g_certs.upstreamCtx = SSL_CTX_new(TLS_client_method());
     SSL_CTX_set_verify(g_certs.upstreamCtx, SSL_VERIFY_PEER, nullptr);
     SSL_CTX_set_default_verify_paths(g_certs.upstreamCtx);

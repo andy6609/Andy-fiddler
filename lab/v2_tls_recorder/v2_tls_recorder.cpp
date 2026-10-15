@@ -444,10 +444,18 @@ static bool makeCa(const std::string& pemPath) {
     X509_sign(c, g_certs.caKey, EVP_sha256());
     g_certs.caCert = c;
 
-    FILE* f = fopen(pemPath.c_str(), "wb");
-    if (!f) return false;
-    PEM_write_X509(f, c);                                     // 클라이언트에게 줄 건 '인증서'만. 개인키는 메모리에만.
-    fclose(f);
+    // 클라이언트에게 줄 건 '인증서'만. 개인키는 메모리에만.
+    // Windows 함정: fopen 한 FILE* 를 OpenSSL DLL 의 PEM_write_X509(FILE*) 에 넘기면
+    //   앱과 DLL 의 C 런타임이 달라 "OPENSSL_Uplink: no OPENSSL_Applink" 로 프로세스가 중단된다.
+    //   -> OpenSSL 은 메모리 BIO 에만 쓰게 하고, 파일은 우리 쪽 C++ 스트림으로 쓴다 (본체 tls.cpp 와 같은 방식).
+    BIO* mem = BIO_new(BIO_s_mem());
+    PEM_write_bio_X509(mem, c);
+    char* pemData = nullptr;
+    long pemSize = BIO_get_mem_data(mem, &pemData);
+    std::ofstream pemFile(pemPath, std::ios::binary);
+    pemFile.write(pemData, pemSize);
+    BIO_free(mem);
+    if (!pemFile) return false;
 
     g_certs.upstreamCtx = SSL_CTX_new(TLS_client_method());
     SSL_CTX_set_verify(g_certs.upstreamCtx, SSL_VERIFY_PEER, nullptr);   // 진짜 서버 인증서는 반드시 검증
