@@ -37,11 +37,24 @@ ctest --test-dir build --output-on-failure   # 단위 테스트 + 프록시 end-
 | 항목 | 상태 |
 |---|---|
 | macOS 호스트에서 빌드·단위 테스트(94개 검사)·end-to-end 테스트(46개 검사) | 통과 (2026-10-15) |
+| lab v1~v8 스모크 테스트(86개 검사) | 통과. 단 v6 라이브 캡처는 권한 문제로 에러 경로만 확인 |
 | headless Chrome으로 UI 실제 조작(목록, 상세, SSE, gzip, 비교, 패킷 hex, 오프라인 보고서) | JS 오류 없이 동작 확인 |
 | Windows 빌드, Npcap 실제 캡처, Windows 인증서 저장소 신뢰 설치 | **미검증** |
 | 실제 AI 서비스·코딩 에이전트 트래픽 관찰 | **미수행** |
 
 자세한 맥락, 설계, 남은 작업은 [AI 인수인계 문서](docs/AI-HANDOFF.md)에, 참고한 오픈소스와 실제 의존성의 구분은 [OPEN-SOURCE-REFERENCES](docs/OPEN-SOURCE-REFERENCES.md)에 있습니다.
+
+## lab/ — 개념별 학습 버전
+
+local-proxy-lab 에서 `proxy_v1 → v4` 로 쌓아 올렸던 것처럼, WireScope 에 들어간 개념을 버전 하나에 하나씩 떼어 만든 실행 파일들이 `lab/` 에 있습니다 (한국어 주석, 버전별 노트).
+
+| | |
+|---|---|
+| v1 flow_recorder → v2 tls_recorder → v3 h2_observer | 프록시 안에서: 기록 단위, HTTPS passthrough/MITM, h2 프레임과 HPACK |
+| v4 packet_decoder → v5 tcp_stream → v6 live_capture | 선 위에서: 필드 offset, TCP 재조립과 GAP, libpcap/BPF |
+| v7 inspector_api → v8 diff_report | 보여주기: 엔진↔브라우저와 보안 경계, 구조 비교와 독립 HTML |
+
+로드맵과 각 버전이 본체 어디에 해당하는지는 [docs/lab/README.md](docs/lab/README.md)에 있습니다. 위에서 아래로 공부하다가 막히는 개념이 있으면 해당 lab 버전으로 내려가서 보면 됩니다.
 
 ## 코드 읽는 순서
 
@@ -51,6 +64,6 @@ ctest --test-dir build --output-on-failure   # 단위 테스트 + 프록시 end-
 4. `src/packet.cpp`, `src/capture.cpp`: 패킷 디코딩과 Npcap 캡처
 5. `src/main.cpp`: 로컬 API와 보안 경계(token, Host, Origin)
 6. `web/app.js`: 실시간 모드와 오프라인 보고서 모드가 함께 쓰는 검사 UI
-7. `tests/`: `core_tests.cpp`(소켓 없는 단위 테스트), `integration_test.py`(curl → 프록시 → 로컬 HTTP/HTTPS/h2 서버)
+7. `tests/`: `core_tests.cpp`(소켓 없는 단위 테스트), `integration_test.py`(curl → 프록시 → 로컬 HTTP/HTTPS/h2 서버), `lab_smoke.py`(lab 버전들)
 
 기존 인턴 프로젝트(`../local-proxy-lab/proxy_ToInfinity/`, `../local-proxy-lab/Infinity_v2/`)는 별도로 보존합니다.

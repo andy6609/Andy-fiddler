@@ -107,7 +107,11 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 | `tests/integration_test.py` | curl → WireScope → 로컬 HTTP·HTTPS·nghttpd(h2) 서버, 46개 검사 | 통과 |
 | `third_party/` | cpp-httplib, nlohmann/json 단일 헤더와 LICENSE | — |
 
+| `lab/` (v1~v8) + `docs/lab/` | 사용자 요청(2026-10-15)으로 local-proxy-lab 처럼 개념별 학습 버전을 한국어 주석으로 만듦. 본체와 코드 공유 없음 | `tests/lab_smoke.py` 86개 검사 통과, v6 라이브 캡처는 미검증 |
+
 **없는 것**: Windows 빌드 스크립트·vcpkg manifest, CI, Windows 실제 캡처 증거, 실제 AI 서비스/에이전트 실험 기록.
+
+사용자 작업 스타일 참고: local-proxy-lab 처럼 버전을 나눠 쌓고, 한국어 주석(목적/핵심/흐름/이전 버전 대비 변화/함정/한계)을 두껍게 달고, 커밋을 작게 자주 나누는 것을 선호한다.
 
 ## 6. 데이터와 API 계약
 
