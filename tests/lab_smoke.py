@@ -289,7 +289,55 @@ def v4(tmp, h1):
     check(rc == 1 and "잘림" in out, "truncated file rejected with a reason")
 
 
-VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4)]
+def tcp_conversation():
+    """A full HTTP-over-TCP conversation as classic pcap, with deliberate capture problems:
+    client data arrives out of order, one server segment is retransmitted, one is missing."""
+    C, S = (bytes([10, 0, 0, 1]), 50000), (bytes([10, 0, 0, 2]), 80)
+    def frame(src, dst, seq, ack, flags, data=b""):
+        tcp = struct.pack("!HHIIBBHHH", src[1], dst[1], seq, ack, 0x50, flags, 65535, 0, 0) + data
+        ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(tcp), 1, 0, 64, 6, 0, src[0], dst[0])
+        return b"\x02" * 12 + b"\x08\x00" + ip + tcp
+    req1, req2 = b"GET /index.html HTTP/1.1\r\n", b"Host: example\r\n\r\n"
+    r1, r2, r3 = b"HTTP/1.1 200 OK\r\n", b"Content-Length: 5\r\n\r\n", b"hello"
+    cs, ss = 1000, 5000  # initial sequence numbers
+    pkts = [
+        frame(C, S, cs, 0, 0x02),                                         # SYN
+        frame(S, C, ss, cs + 1, 0x12),                                    # SYN+ACK
+        frame(C, S, cs + 1, ss + 1, 0x10),                                # ACK
+        frame(C, S, cs + 1 + len(req1), ss + 1, 0x18, req2),              # 2nd half first (out of order)
+        frame(C, S, cs + 1, ss + 1, 0x18, req1),                          # 1st half
+        frame(S, C, ss + 1, cs + 1 + len(req1 + req2), 0x18, r1),
+        frame(S, C, ss + 1, cs + 1 + len(req1 + req2), 0x18, r1),        # retransmission of r1
+        # r2 is never captured -> gap of len(r2)
+        frame(S, C, ss + 1 + len(r1 + r2), cs + 1 + len(req1 + req2), 0x18, r3),
+        frame(C, S, cs + 1 + len(req1 + req2), ss + 1 + len(r1 + r2 + r3), 0x11),   # FIN+ACK
+        frame(S, C, ss + 1 + len(r1 + r2 + r3), cs + 2 + len(req1 + req2), 0x11),   # FIN+ACK
+        frame(C, S, cs + 2 + len(req1 + req2), ss + 2 + len(r1 + r2 + r3), 0x10),   # ACK
+    ]
+    out = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
+    for i, fr in enumerate(pkts):
+        out += struct.pack("<IIII", 1700000000, i * 1000, len(fr), len(fr)) + fr
+    return out, req1 + req2, (r1, r2, r3)
+
+
+def v5(tmp, h1):
+    print("v5_tcp_stream")
+    pcap, request, (r1, r2, r3) = tcp_conversation()
+    path = f"{tmp}/conv.pcap"
+    with open(path, "wb") as f:
+        f.write(pcap)
+    with open(f"{tmp}/mixed.pcap", "wb") as f:
+        f.write(it.synthetic_pcap())
+    rc, out = run("v5_tcp_stream", path)
+    check(rc == 0 and "1 connections" in out and "10.0.0.1:50000 -> 10.0.0.2:80" in out, "one connection, client = SYN sender")
+    life = [l.split("->", 1)[1].split()[1] for l in out.splitlines() if l.strip().startswith("+")]
+    check(life == ["SYN", "SYN+ACK", "FIN+ACK", "FIN+ACK"], f"handshake and teardown in order: {life}")
+    rc, out = run("v5_tcp_stream", f"{tmp}/mixed.pcap")
+    check(rc == 0 and "(SYN" not in out and "1 connections" in out, "UDP ignored, SYN seen in synthetic capture")
+    return path, request, (r1, r2, r3)
+
+
+VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5)]
 
 
 def main():
