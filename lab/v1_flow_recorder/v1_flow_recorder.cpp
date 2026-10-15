@@ -6,10 +6,22 @@
        WireScope 의 첫 단계는 거기서 한 발 더: 지나가는 요청 하나하나를
        "Flow" 라는 기록 단위로 남기는 것. (mitmproxy 의 flow 개념)
 
- [v1 단계 1 — 이 커밋]
+ [v1 단계 1]
    accept -> 요청 헤드 파싱 -> upstream connect -> 헤드+body 전달
           -> 응답 헤드 파싱 -> body 전달 -> (keep-alive 면) 다음 요청
-   body 길이는 Content-Length 만 지원. (chunked 는 다음 단계)
+
+ [v1 단계 2]
+   + chunked (Transfer-Encoding) 전달, trailer 까지
+   + 요청/응답 하나를 Flow 로 묶어서 flows.jsonl 에 한 줄씩 기록
+       {id, method, host, port, path, status, 헤더(순서 그대로), body(base64),
+        captured/total, timeline(ms), 연결 endpoint}
+
+ ★ 기록할 때 지킨 원칙 (WireScope 본체까지 그대로 이어짐):
+   1) body 는 방향별 1 MiB 까지만 '보관'하고, 전체 크기(total)는 끝까지 '센다'.
+      -> 화면에 "1 MiB 중 1 MiB 보관 / 전체 1.5 MiB" 처럼 사실대로 보여줄 수 있게.
+   2) chunked body 는 청크 껍데기(크기줄, CRLF)를 벗긴 '내용'만 기록한다.
+      -> 그래서 기록된 바이트 수 != 실제 소켓으로 오간 바이트 수. 노트에 적어둠.
+   3) "이건 파일 업로드다" 같은 판단은 기록에 넣지 않는다. 헤더/바이트/시간만.
 
  흐름 그림:
      curl  --(GET http://host/path)-->  [v1 :18081]  --(GET /path)-->  host
@@ -25,16 +37,24 @@
 
 #include "lab_net.hpp"
 
+#include "json.hpp"   // nlohmann/json (third_party). JSON 직렬화는 직접 안 짜고 라이브러리로.
+
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <fstream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+using json = nlohmann::json;
+
 static const uint16_t LISTEN_PORT = 18081;
+static const size_t BODY_LIMIT = 1024 * 1024;   // 방향별 보관 한도 (WireScope 와 같은 값)
 
 
 // ------------------------------------------------------------
@@ -137,32 +157,139 @@ static int64_t nowMs() {
 
 
 // ------------------------------------------------------------
-// body 전달 (단계 1: Content-Length 만)
+// base64: 바이너리 body 를 JSON 문자열에 넣으려면 텍스트로 바꿔야 한다.
+//   3바이트(24bit) -> 6bit 씩 4글자. 모자라면 '=' 로 채움.
+//   (Go 라면 base64.StdEncoding.EncodeToString(b) 한 줄)
+// ------------------------------------------------------------
+static std::string base64(const std::string& in) {
+    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    size_t i = 0;
+    for (; i + 2 < in.size(); i += 3) {
+        uint32_t v = (uint8_t(in[i]) << 16) | (uint8_t(in[i + 1]) << 8) | uint8_t(in[i + 2]);
+        out += T[v >> 18]; out += T[(v >> 12) & 63]; out += T[(v >> 6) & 63]; out += T[v & 63];
+    }
+    if (i + 1 == in.size()) {
+        uint32_t v = uint8_t(in[i]) << 16;
+        out += T[v >> 18]; out += T[(v >> 12) & 63]; out += "==";
+    } else if (i + 2 == in.size()) {
+        uint32_t v = (uint8_t(in[i]) << 16) | (uint8_t(in[i + 1]) << 8);
+        out += T[v >> 18]; out += T[(v >> 12) & 63]; out += T[(v >> 6) & 63]; out += '=';
+    }
+    return out;
+}
+
+
+// ------------------------------------------------------------
+// Captured: body 를 '보관(앞 1 MiB)' 과 '세기(전체)' 로 나눠서 받는 그릇
+// ------------------------------------------------------------
+struct Captured {
+    std::string bytes;      // 보관한 앞부분
+    uint64_t total = 0;     // 실제로 지나간 전체 길이
+    void add(const std::string& data) {
+        total += data.size();
+        if (bytes.size() < BODY_LIMIT) bytes.append(data, 0, std::min(data.size(), BODY_LIMIT - bytes.size()));
+    }
+    json toJson() const {
+        return {{"base64", base64(bytes)}, {"captured", bytes.size()}, {"total", total}, {"truncated", total > bytes.size()}};
+    }
+};
+
+
+// ------------------------------------------------------------
+// Flow: 요청 하나 + 그 응답 하나 = 기록 단위
+//   timeline 은 "언제 무엇이 일어났나" — 시작 기준 ms.
+//   endpoints 는 [클라이언트<->프록시, 프록시<->서버] 소켓 주소.
+//     -> v4/v5 에서 패킷 캡처와 맞춰볼 때 이 주소쌍이 연결 key 가 된다.
+// ------------------------------------------------------------
+struct Flow {
+    uint64_t id = 0;
+    int64_t started = 0;
+    std::string method, host, path, error;
+    uint16_t port = 0;
+    int status = 0;
+    Headers requestHeaders, responseHeaders, responseTrailers;
+    Captured request, response;
+    json timeline = json::array();
+    json endpoints = json::array();
+
+    void mark(const char* event) { timeline.push_back({{"t", nowMs() - started}, {"event", event}}); }
+    json toJson() const {
+        return {{"id", id}, {"time", started}, {"method", method}, {"host", host}, {"port", port}, {"path", path},
+                {"status", status}, {"error", error}, {"requestHeaders", requestHeaders}, {"responseHeaders", responseHeaders},
+                {"responseTrailers", responseTrailers}, {"request", request.toJson()}, {"response", response.toJson()},
+                {"timeline", timeline}, {"endpoints", endpoints}};
+    }
+};
+
+static std::atomic<uint64_t> g_nextId{1};
+static std::mutex g_fileMutex;          // 여러 연결 스레드가 같은 파일에 쓰니까 한 줄씩 잠그고 쓴다
+static std::string g_outPath = "flows.jsonl";
+
+static void saveFlow(const Flow& f) {
+    std::lock_guard<std::mutex> lock(g_fileMutex);
+    std::ofstream out(g_outPath, std::ios::app | std::ios::binary);
+    out << f.toJson().dump(-1, ' ', false, json::error_handler_t::replace) << "\n";   // JSON Lines: 한 줄 = Flow 하나
+}
+
+
+// ------------------------------------------------------------
+// body 전달 (Content-Length / chunked / 연결 종료까지)
 //   from 에서 정확히 n 바이트 읽어서 to 로 보낸다.
 //   한 번에 다 읽지 않고 16KB 씩: 큰 파일 업로드도 메모리에 통째로 안 올림.
 // ------------------------------------------------------------
-static bool forwardExact(Reader& from, sock_t to, uint64_t n, uint64_t& counted) {
+static bool forwardExact(Reader& from, sock_t to, uint64_t n, Captured& cap) {
     while (n > 0) {
         std::string chunk;
         size_t want = size_t(std::min<uint64_t>(n, 16384));
         if (!from.exact(want, chunk)) return false;
         if (!lab::sendAll(to, chunk)) return false;
-        counted += chunk.size();
+        cap.add(chunk);
         n -= chunk.size();
     }
     return true;
 }
 
+// chunked 형식:
+//   1a\r\n            <- 16진수 청크 크기 (뒤에 ;확장 붙을 수 있음)
+//   ...26바이트...\r\n
+//   0\r\n              <- 크기 0 = 마지막 청크
+//   X-Checksum: abc\r\n  <- (선택) trailer 헤더
+//   \r\n
+// 전달은 받은 줄을 그대로(껍데기 포함), 기록은 내용만.
+static bool forwardChunked(Reader& from, sock_t to, Captured& cap, Headers* trailers) {
+    for (;;) {
+        std::string sizeLine;
+        if (!from.line(sizeLine)) return false;
+        lab::sendAll(to, sizeLine + "\r\n");
+        uint64_t n = std::stoull(sizeLine.substr(0, sizeLine.find(';')), nullptr, 16);
+        if (n == 0) {
+            for (;;) {                                          // trailer 영역: 빈 줄까지
+                std::string line;
+                if (!from.line(line)) return false;
+                lab::sendAll(to, line + "\r\n");
+                if (line.empty()) return true;
+                size_t c = line.find(':');
+                if (trailers && c != std::string::npos) trailers->emplace_back(line.substr(0, c), trim(line.substr(c + 1)));
+            }
+        }
+        if (!forwardExact(from, to, n, cap)) return false;
+        std::string crlf;
+        if (!from.exact(2, crlf) || crlf != "\r\n") return false;   // 청크 데이터 뒤엔 반드시 CRLF
+        lab::sendAll(to, crlf);
+    }
+}
+
 // 응답 body 길이를 모를 때 (Content-Length 없음): 서버가 연결을 끊을 때까지가 body
-static void forwardUntilClose(Reader& from, sock_t to, uint64_t& counted) {
+static void forwardUntilClose(Reader& from, sock_t to, Captured& cap) {
     if (!from.buf.empty()) {
         lab::sendAll(to, from.buf);
-        counted += from.buf.size();
+        cap.add(from.buf);
         from.buf.clear();
     }
     while (from.fill()) {
         lab::sendAll(to, from.buf);
-        counted += from.buf.size();
+        cap.add(from.buf);
         from.buf.clear();
     }
 }
@@ -181,7 +308,11 @@ static void handleClient(sock_t client) {
 
     Head req;
     while (readHead(cr, req)) {                       // keep-alive: 한 연결에서 요청 여러 개
-        int64_t started = nowMs();
+        Flow flow;
+        flow.id = g_nextId++;
+        flow.started = nowMs();
+        flow.requestHeaders = req.headers;
+        flow.mark("request.headers");
 
         // 1. 요청줄 쪼개기: METHOD SP target SP version
         size_t s1 = req.startLine.find(' '), s2 = req.startLine.rfind(' ');
@@ -206,13 +337,21 @@ static void handleClient(sock_t client) {
             port = uint16_t(std::stoi(authority.substr(colon + 1)));
         }
 
+        flow.method = method;
+        flow.host = host;
+        flow.port = port;
+        flow.path = path;
+
         // 3. upstream 연결 (같은 host:port 면 재사용)
         if (up == BAD_SOCK || host != upHost || port != upPort) {
             lab::closeSock(up);
             up = lab::connectTo(host, port);
             if (up == BAD_SOCK) {
                 lab::sendAll(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
-                printf("[v1] connect 실패 %s:%u\n", host.c_str(), port);
+                flow.error = "upstream connect failed";
+                flow.mark("connection.error");
+                saveFlow(flow);                        // 실패도 기록 대상
+                printf("[v1] #%llu connect 실패 %s:%u\n", (unsigned long long)flow.id, host.c_str(), port);
                 break;
             }
             lab::setTimeout(up, 30);
@@ -221,52 +360,69 @@ static void handleClient(sock_t client) {
             upPort = port;
         }
 
+        flow.endpoints = {lab::endpointOf(client, true) + " | " + lab::endpointOf(client, false),
+                          lab::endpointOf(up, false) + " | " + lab::endpointOf(up, true)};
+
         // 4. 요청 전달: 요청줄은 origin-form 으로, 프록시 전용 헤더는 제거
         Head out = req;
         out.startLine = method + " " + path + " HTTP/1.1";
         headerErase(out.headers, "Proxy-Connection");
         lab::sendAll(up, serialize(out));
-        uint64_t reqBytes = 0;
         std::string cl = headerGet(req.headers, "Content-Length");
-        if (!cl.empty() && !forwardExact(cr, up, std::stoull(cl), reqBytes)) break;
+        bool ok = true;
+        if (lower(headerGet(req.headers, "Transfer-Encoding")) == "chunked") ok = forwardChunked(cr, up, flow.request, nullptr);
+        else if (!cl.empty()) ok = forwardExact(cr, up, std::stoull(cl), flow.request);
+        flow.mark("request.end");
 
         // 5. 응답 헤드 받아서 그대로 전달
         Head res;
-        if (!readHead(ur, res)) break;
+        if (!ok || !readHead(ur, res)) {
+            flow.error = "request relay or response head failed";
+            saveFlow(flow);
+            break;
+        }
+        flow.mark("response.headers");
+        flow.responseHeaders = res.headers;
         lab::sendAll(client, serialize(res));
-        int status = std::atoi(res.startLine.c_str() + res.startLine.find(' ') + 1);
+        flow.status = std::atoi(res.startLine.c_str() + res.startLine.find(' ') + 1);
 
-        // 6. 응답 body
-        uint64_t resBytes = 0;
+        // 6. 응답 body: 어떤 방식으로 끝나는지 헤더가 알려준다
         bool closeAfter = false;
         std::string rcl = headerGet(res.headers, "Content-Length");
-        if (method == "HEAD" || status == 204 || status == 304) {
-            // body 없음
+        if (method == "HEAD" || flow.status == 204 || flow.status == 304) {
+            // body 없음 (규칙상)
+        } else if (lower(headerGet(res.headers, "Transfer-Encoding")) == "chunked") {
+            ok = forwardChunked(ur, client, flow.response, &flow.responseTrailers);
         } else if (!rcl.empty()) {
-            if (!forwardExact(ur, client, std::stoull(rcl), resBytes)) break;
+            ok = forwardExact(ur, client, std::stoull(rcl), flow.response);
         } else {
-            forwardUntilClose(ur, client, resBytes);
+            forwardUntilClose(ur, client, flow.response);   // 길이 정보 없음 = 서버가 끊을 때까지
             closeAfter = true;
         }
+        if (!ok) flow.error = "response body ended early";
+        flow.mark("response.end");
+        saveFlow(flow);
 
-        printf("[v1] %s %s:%u%s -> %d   req %llu B  res %llu B  %lld ms\n", method.c_str(), host.c_str(), port, path.c_str(), status,
-               (unsigned long long)reqBytes, (unsigned long long)resBytes, (long long)(nowMs() - started));
-        if (closeAfter || lower(headerGet(req.headers, "Connection")) == "close") break;
+        printf("[v1] #%llu %s %s:%u%s -> %d   req %llu B  res %llu B%s  %lld ms\n", (unsigned long long)flow.id, method.c_str(), host.c_str(), port,
+               path.c_str(), flow.status, (unsigned long long)flow.request.total, (unsigned long long)flow.response.total,
+               flow.response.total > flow.response.bytes.size() ? " (1 MiB 까지만 보관)" : "", (long long)(nowMs() - flow.started));
+        if (!ok || closeAfter || lower(headerGet(req.headers, "Connection")) == "close") break;
     }
     lab::closeSock(up);
     lab::closeSock(client);
 }
 
 
-int main() {
+int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);   // 파일/파이프로 보낼 때도 줄 단위로 바로 출력
+    if (argc > 1) g_outPath = argv[1];     // 기록 파일 경로 (기본 ./flows.jsonl)
     lab::netInit();
     sock_t listener = lab::listenLocal(LISTEN_PORT);
     if (listener == BAD_SOCK) {
         printf("listen 실패 (포트 %u 사용 중?)\n", LISTEN_PORT);
         return 1;
     }
-    printf("[v1] 127.0.0.1:%u 에서 대기. 예) curl -x http://127.0.0.1:%u http://example.com/\n", LISTEN_PORT, LISTEN_PORT);
+    printf("[v1] 127.0.0.1:%u 에서 대기, 기록 -> %s\n     예) curl -x http://127.0.0.1:%u http://example.com/\n", LISTEN_PORT, g_outPath.c_str(), LISTEN_PORT);
     for (;;) {
         sock_t c = accept(listener, nullptr, nullptr);
         if (c == BAD_SOCK) continue;
