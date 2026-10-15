@@ -27,7 +27,7 @@ std::string ipv4Frame(uint8_t proto, const std::string& transport) {
     std::string eth(12, '\x11'); eth += "\x08\x00"s;
     std::string ip(20, '\0'); ip[0] = 0x45; put16(ip, 2, uint16_t(20 + transport.size())); ip[8] = 64; ip[9] = char(proto);
     ip[12] = 10; ip[13] = 0; ip[14] = 0; ip[15] = 1;
-    ip[16] = char(93); ip[17] = char(184); ip[18] = char(216); ip[19] = char(34);
+    ip[16] = char(93); ip[17] = '\xb8'; ip[18] = '\xd8'; ip[19] = char(34);  // 184, 216 as literals: char(184) truncates (MSVC C4310)
     return eth + ip + transport;
 }
 std::string tcp(uint16_t sp, uint16_t dp, uint32_t seq, uint8_t flags, const std::string& payload) {

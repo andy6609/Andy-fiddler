@@ -28,7 +28,7 @@ std::string tlsError(){unsigned long e=ERR_get_error();char b[256]{};ERR_error_s
 }
 struct Proxy::Impl {
     Store& store;Tls& tls;std::atomic<bool> running{false};sock_t listener=bad_socket;std::thread accepter;
-    mutable std::mutex mutex;std::map<sock_t,sock_t> sockets;std::string error;uint16_t port=18080;bool mitm=true;
+    mutable std::mutex mutex;std::map<sock_t,sock_t> sockets;std::string error;uint16_t listenPort=18080;bool mitm=true;
     struct Worker{std::thread thread;std::shared_ptr<std::atomic<bool>> done;};std::vector<Worker> workers;
     Impl(Store& s,Tls& t):store(s),tls(t){}
     void connect(Channel& up,sock_t client,const std::string& host,uint16_t port){
@@ -97,12 +97,12 @@ setsockopt(listener,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,reinterpret_cast<const char*>
 #else
 setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
 #endif
-sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);addr.sin_port=htons(port);if(bind(listener,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))!=0||listen(listener,64)!=0){closeSocket(listener);throw std::runtime_error("Proxy port is unavailable");}i.listener=listener;i.port=port;i.mitm=mitm;i.running=true;{std::lock_guard lock(i.mutex);i.error.clear();}
+sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);addr.sin_port=htons(port);if(bind(listener,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))!=0||listen(listener,64)!=0){closeSocket(listener);throw std::runtime_error("Proxy port is unavailable");}i.listener=listener;i.listenPort=port;i.mitm=mitm;i.running=true;{std::lock_guard lock(i.mutex);i.error.clear();}
     i.accepter=std::thread([&i]{while(i.running){fd_set r;FD_ZERO(&r);FD_SET(i.listener,&r);timeval tv{0,100000};if(select(int(i.listener)+1,&r,nullptr,nullptr,&tv)<=0)continue;auto s=accept(i.listener,nullptr,nullptr);if(s==bad_socket)continue;{std::lock_guard lock(i.mutex);if(i.sockets.size()>=64||!i.running){closeSocket(s);continue;}i.sockets[s]=bad_socket;}
         for(auto it=i.workers.begin();it!=i.workers.end();){if(it->done->load()){it->thread.join();it=i.workers.erase(it);}else ++it;}
         auto done=std::make_shared<std::atomic<bool>>(false);i.workers.push_back({std::thread([&i,s,done]{try{i.serve(s);}catch(...){std::lock_guard lock(i.mutex);i.error="Unhandled connection error";i.sockets.erase(s);}*done=true;}),done});}
     });
 }
 void Proxy::stop(){auto& i=*impl_;i.running=false;if(i.accepter.joinable())i.accepter.join();closeSocket(i.listener);i.listener=bad_socket;{std::lock_guard lock(i.mutex);for(auto& [c,u]:i.sockets){shutdownSocket(c);shutdownSocket(u);}}for(auto& w:i.workers)if(w.thread.joinable())w.thread.join();i.workers.clear();}
-json Proxy::status()const{auto& i=*impl_;std::lock_guard lock(i.mutex);return {{"running",i.running.load()},{"port",i.port},{"mitm",i.mitm},{"connections",i.sockets.size()},{"error",i.error}};}
+json Proxy::status()const{auto& i=*impl_;std::lock_guard lock(i.mutex);return {{"running",i.running.load()},{"port",i.listenPort},{"mitm",i.mitm},{"connections",i.sockets.size()},{"error",i.error}};}
 }

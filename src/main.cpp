@@ -13,12 +13,12 @@
 #endif
 using namespace ws;
 namespace {
-std::atomic<bool> quit{false},cleaned{false};
-void onSignal(int){quit=true;}
+std::atomic<bool> quitRequested{false},cleaned{false};  // not "quit": httplib.h has a local of that name (MSVC C4459)
+void onSignal(int){quitRequested=true;}
 #ifdef _WIN32
 // Closing the console window, logoff and shutdown end the process soon after this handler returns.
 // Hold it (up to ~5 s, the system limit) until main() has stopped the proxy and capture.
-BOOL WINAPI onConsole(DWORD type){quit=true;if(type==CTRL_CLOSE_EVENT||type==CTRL_LOGOFF_EVENT||type==CTRL_SHUTDOWN_EVENT)for(int i=0;i<45&&!cleaned;++i)Sleep(100);return TRUE;}
+BOOL WINAPI onConsole(DWORD type){quitRequested=true;if(type==CTRL_CLOSE_EVENT||type==CTRL_LOGOFF_EVENT||type==CTRL_SHUTDOWN_EVENT)for(int i=0;i<45&&!cleaned;++i)Sleep(100);return TRUE;}
 #endif
 std::string utf8(const std::filesystem::path& p){auto u=p.u8string();return std::string(u.begin(),u.end());}
 std::string readFile(const std::filesystem::path& p){std::ifstream f(p,std::ios::binary);if(!f)throw std::runtime_error("Missing asset: "+utf8(p));return {(std::istreambuf_iterator<char>(f)),{}};}
@@ -94,5 +94,5 @@ int main(int argc,char** argv){try{
 #else
     (void)open;
 #endif
-    std::thread stopper([&]{while(!quit)std::this_thread::sleep_for(std::chrono::milliseconds(100));server.stop();});server.listen_after_bind();quit=true;stopper.join();if(sysproxy.owned())try{sysproxy.restore();}catch(const std::exception& e){std::cerr<<"WireScope: system proxy not restored: "<<e.what()<<"\n";}capture.stop();proxy.stop();cleaned=true;return 0;
+    std::thread stopper([&]{while(!quitRequested)std::this_thread::sleep_for(std::chrono::milliseconds(100));server.stop();});server.listen_after_bind();quitRequested=true;stopper.join();if(sysproxy.owned())try{sysproxy.restore();}catch(const std::exception& e){std::cerr<<"WireScope: system proxy not restored: "<<e.what()<<"\n";}capture.stop();proxy.stop();cleaned=true;return 0;
 }catch(const std::exception& e){std::cerr<<"WireScope: "<<e.what()<<"\n";return 1;}}
