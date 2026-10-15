@@ -52,6 +52,9 @@
 
 #include "json.hpp"
 
+// MSVC 에는 ssize_t 가 없다. 이 매크로를 켜면 nghttp2.h 가 ssize_t 를 쓰는 옛 API 선언을 빼서 Windows 에서도 컴파일된다.
+// (v3 는 처음부터 nghttp2_ssize 를 쓰는 hd_inflate_hd3 만 쓰므로 잃는 것이 없다)
+#define NGHTTP2_NO_SSIZE_T
 #include <nghttp2/nghttp2.h>       // HPACK inflater 만 사용
 #include <openssl/err.h>
 #include <openssl/pem.h>
