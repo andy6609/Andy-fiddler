@@ -88,11 +88,13 @@ jobs:
           python .github/ci_annotate.py test ctest.log
           exit $code
 
-      - name: Package
+      # The user-facing script, so it is exercised too (configure/build are no-ops by now; it installs and zips).
+      - name: Package with scripts/build-windows.ps1
         run: |
-          cmake --install build-windows --config Release --prefix dist/WireScope
+          .\scripts\build-windows.ps1 -Test none -Package
           Get-ChildItem dist/WireScope -Recurse -File | ForEach-Object { "{0,10}  {1}" -f $_.Length, $_.FullName.Substring((Resolve-Path dist/WireScope).Path.Length + 1) }
-          Compress-Archive -Path dist/WireScope/* -DestinationPath dist/WireScope-windows-x64.zip
+          $files = (Get-ChildItem dist/WireScope -Recurse -File | ForEach-Object { $_.Name }) -join ', '
+          Write-Host "::notice title=Package::$files"
 
       - uses: actions/upload-artifact@v4
         with:
