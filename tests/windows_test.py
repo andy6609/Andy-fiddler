@@ -11,6 +11,9 @@
    way out restores the original value: turning it off, stopping the proxy, and the next start after
    a crash (TerminateProcess). This changes the current user's proxy setting for a few seconds, so it
    runs only when CI=true (GitHub Actions) or WIRESCOPE_TEST_SYSPROXY=1.
+3. Unicode paths: --data pointing at a folder with Korean characters. argv arrives in the ANSI code page
+   (cp1252 on the runner, cp949 on Korean Windows), so without re-reading the UTF-16 command line the
+   characters become '?' and the CA would not land in that folder.
 
 Reuses tests/integration_test.py for the local servers, certificates and the engine wrapper.
 """
@@ -189,6 +192,36 @@ def sysproxy_checks(engine, tmp, h1, proxy):
     return engine
 
 
+def unicode_path_checks(tmp):
+    print("Unicode --data path (CommandLineToArgvW + u8path)")
+    data = os.path.join(tmp, "한글 데이터 폴더")
+    port = it.free_port()
+    proc = subprocess.Popen([f"{it.BUILD}/WireScope{it.EXE}", "--no-open", "--port", str(port), "--data", data, "--web", f"{it.BUILD}/web"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        token = None
+        for _ in range(100):
+            try:
+                token = json.load(it.urllib.request.urlopen(base + "/api/bootstrap"))["token"]
+                break
+            except OSError:
+                time.sleep(0.05)
+        check(token is not None, "engine started with a Korean --data path")
+        if token is None:
+            return
+        req = it.urllib.request.Request(base + "/api/ca/create", data=b"{}", method="POST",
+                                        headers={"X-WireScope-Token": token, "Content-Type": "application/json"})
+        info = json.load(it.urllib.request.urlopen(req))
+        print(f"  info CA path reported: {info.get('path')}")
+        check("한글 데이터 폴더" in info.get("path", ""), "the engine reports the CA under the Korean folder name, not '?'")
+        check(os.path.exists(os.path.join(data, "root-ca.pem")) and os.path.exists(os.path.join(data, "root-key.pem")),
+              "root-ca.pem and root-key.pem exist in that exact folder")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
 def ensure_restored(tmp):
     """Safety net: never leave this machine's proxy pointing at a test port."""
     if os.path.exists(f"{tmp}/data/system-proxy-backup.json"):
@@ -229,6 +262,7 @@ def main():
         status, st = engine.request("POST", "/api/proxy/start", {"port": proxy, "mitm": True})
         check(status == 200 and st["running"], "proxy starts")
         process_checks(engine, tmp, h1, hs, h2port, proxy)
+        unicode_path_checks(tmp)
         if os.environ.get("CI") == "true" or os.environ.get("WIRESCOPE_TEST_SYSPROXY") == "1":
             engine = sysproxy_checks(engine, tmp, h1, proxy)
             procs.append(engine.proc)
