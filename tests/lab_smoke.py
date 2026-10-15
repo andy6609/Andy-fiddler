@@ -427,7 +427,41 @@ def v7(tmp, h1):
     return src
 
 
-VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7)]
+def agent_records(path):
+    """Two agent-shaped request records (same task, second turn adds a tool_use) in the v1 JSONL format."""
+    def rec(i, body, extra=()):
+        return {"id": i, "method": "POST", "host": "api.example", "path": "/v1/messages", "status": 200,
+                "requestHeaders": [["Content-Type", "application/json"], ["Authorization", "Bearer sk-secret"], *extra],
+                "responseHeaders": [["Date", f"Mon {i}"], ["x-request-id", f"r{i}"]],
+                "request": {"base64": base64.b64encode(json.dumps(body).encode()).decode(), "captured": 1, "total": 1, "truncated": False},
+                "response": {"base64": base64.b64encode(b"event: done\n\n").decode(), "captured": 13, "total": 13}}
+    a = {"model": "m", "stream": True, "messages": [{"role": "user", "content": "Read main.cpp"}], "metadata": {"user_id": "u1"}}
+    b = {"model": "m", "stream": True, "messages": [{"role": "user", "content": "Read main.cpp"},
+         {"role": "assistant", "content": [{"type": "tool_use", "name": "read_file", "input": {"path": "main.cpp"}}]}], "metadata": {"user_id": "u2"}}
+    with open(path, "w") as f:
+        f.write(json.dumps(rec(1, a)) + "\n" + json.dumps(rec(2, b, [["X-Extra", "1"]])) + "\n")
+
+
+def v8(tmp, h1):
+    print("v8_diff_report")
+    src = f"{tmp}/agents.jsonl"
+    agent_records(src)
+    rc, out = run("v8_diff_report", src, "1", "2")
+    check(rc == 0 and "4 added · 0 removed · 1 changed · 4 unchanged" in out, "leaf-path counts")
+    rows = [l.split()[:2] for l in out.splitlines() if l.startswith("  changed") or l.startswith("  added")]
+    check(rows[0] == ["changed", "$.metadata.user_id"] and ["added", "$.messages[1].content[0].type"] in rows, "changed/added paths")
+    check(out.index("$.messages[1].role") < out.index("$.messages[1].content[0].type"), "original key order kept (role before content)")
+    rc, out = run("v8_diff_report", src, "1", "2", "--ignore", "metadata.user_id, messages[*].content")
+    check("1 added · 0 removed · 0 changed · 3 unchanged · 5 ignored by: metadata.user_id messages[*].content" in out, "ignored paths counted and named")
+    rc, out = run("v8_diff_report", src, "1", "2", "--part", "reqHeaders")
+    check("added    $.x-extra" in out and "authorization" not in out.split("unchanged")[1], "header diff (case-insensitive names)")
+    rc, out = run("v8_diff_report", src, "1", "2", "--part", "resBody")
+    check("not JSON on both sides" in out and "identical" in out, "non-JSON bodies compared as bytes")
+    rc, out = run("v8_diff_report", f"{tmp}/v1.jsonl")
+    check(rc == 0 and "#2 POST 127.0.0.1/echo" in out, "lists real v1 records")
+
+
+VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7), ("v8", v8)]
 
 
 def main():
