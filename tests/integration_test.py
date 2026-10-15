@@ -280,7 +280,9 @@ def main():
         before = len(engine.flows())
         rc, out, _ = curl("--http1.1", "--cacert", f"{tmp}/up-ca.pem", f"https://localhost:{HS}/hello", proxy=proxy)
         check(rc == 0 and out == b"hello world", "TLS passthrough works with the server's own certificate")
+        started = time.time()
         rc, _, _ = curl(f"http://127.0.0.1:{free_port()}/nothing", proxy=proxy)
+        refused_seconds = time.time() - started
         flows = wait_settled(engine, before + 2)
         tunnel = [f for f in flows[before:] if f["method"] == "CONNECT"]
         check(tunnel and tunnel[0].get("encrypted") and tunnel[0]["requestBytes"] > 0 and tunnel[0]["responseBytes"] > 0, "passthrough tunnel records encrypted byte counts")
@@ -289,6 +291,9 @@ def main():
             check(raw[:1] == b"\x16", "tunnel bytes start with a TLS handshake record")
         errs = [f for f in flows[before:] if f["state"] == "error"]
         check(errs and "Upstream connection failed" in errs[0].get("error", ""), "refused upstream recorded as error flow")
+        # The proxy gives up on an upstream after 10 s; a refused port must be noticed well before that
+        # (Windows signals the failure through select()'s exceptfds, not writefds).
+        check(refused_seconds < 6, f"refused upstream noticed without waiting for the 10 s timeout ({refused_seconds:.1f} s)")
         engine.request("POST", "/api/proxy/stop", {})
 
         print("Exports and imports")
