@@ -168,8 +168,9 @@ def v2(tmp, h1):
     check(echo and base64.b64decode(echo["request"]["base64"]) == payload, "decrypted request body recorded")
     tunnels = [f for f in flows if f["method"] == "CONNECT"]
     check(any(t["observed"].get("clientAlpn") == "http/1.1" for t in tunnels), "ALPN http/1.1 recorded on the tunnel")
-    check(any("client TLS handshake failed" in t["error"] for t in tunnels),
-          f"untrusted-CA handshake failure recorded (tunnel errors: {[t['error'] for t in tunnels]})")
+    # Depending on the client the rejection fails SSL_accept, or arrives right after it (seen with curl/LibreSSL on Windows).
+    check(any("client TLS handshake failed" in t["error"] or "client ended TLS right after the handshake" in t["error"] for t in tunnels),
+          f"untrusted-CA rejection recorded on the tunnel (tunnel errors: {[t['error'] for t in tunnels]})")
 
 
 def h2_server(tmp, files):

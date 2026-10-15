@@ -300,6 +300,17 @@ def main():
         check(len(tunnels) >= 2 and all(t.get("alpn") in ("h2", "http/1.1") for t in tunnels), "CONNECT flows record negotiated ALPN")
         check(all(len(f.get("packetKeys", [])) == 2 for f in hello), "client and upstream endpoint keys recorded")
 
+        print("Client that does not trust the local CA")
+        before = len(engine.flows())
+        rc, _, _ = curl("--http1.1", f"https://localhost:{HS}/hello", proxy=proxy)  # no --cacert: the forged leaf must be rejected
+        rc2, _, _ = curl("--http2", f"https://localhost:{h2port}/f1.json", proxy=proxy)
+        rejected = [f for f in wait_settled(engine, before + 2)[before:] if f["method"] == "CONNECT"]
+        print(f"  info recorded: {[(f['path'], f['state'], f.get('error', '')) for f in rejected]}")
+        recorded = lambda f: f["state"] == "error" and ("Client TLS" in f.get("error", "") or "TLS read failed" in f.get("error", ""))
+        check(rc != 0 and rc2 != 0, "both clients refuse the forged certificate")
+        check(len(rejected) == 2 and all(recorded(f) for f in rejected),
+              "the rejection is recorded on each CONNECT flow (HTTP/1.1 and h2 ALPN), whether it fails SSL_accept or arrives after it")
+
         print("Passthrough and errors")
         engine.request("POST", "/api/proxy/stop", {})
         engine.request("POST", "/api/proxy/start", {"port": proxy, "mitm": False})
