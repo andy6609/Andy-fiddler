@@ -34,7 +34,9 @@ struct Proxy::Impl {
         {std::lock_guard lock(mutex);sockets[client]=bad_socket;up.reset();}
         addrinfo hints{},*result=nullptr;hints.ai_family=AF_UNSPEC;hints.ai_socktype=SOCK_STREAM;
         if(getaddrinfo(host.c_str(),std::to_string(port).c_str(),&hints,&result)!=0)throw std::runtime_error("DNS lookup failed: "+host);
-        for(auto* a=result;a&&running;a=a->ai_next){sock_t s=socket(a->ai_family,a->ai_socktype,a->ai_protocol);if(s==bad_socket)continue;{std::lock_guard lock(mutex);sockets[client]=s;}nonblocking(s,true);int resultCode=::connect(s,a->ai_addr,int(a->ai_addrlen));bool ok=resultCode==0;auto end=nowMs()+10000;while(!ok&&running&&nowMs()<end){fd_set w;FD_ZERO(&w);FD_SET(s,&w);timeval tv{0,100000};if(select(int(s)+1,nullptr,&w,nullptr,&tv)>0){int e=0;
+        for(auto* a=result;a&&running;a=a->ai_next){sock_t s=socket(a->ai_family,a->ai_socktype,a->ai_protocol);if(s==bad_socket)continue;{std::lock_guard lock(mutex);sockets[client]=s;}nonblocking(s,true);int resultCode=::connect(s,a->ai_addr,int(a->ai_addrlen));bool ok=resultCode==0;auto end=nowMs()+10000;while(!ok&&running&&nowMs()<end){
+            // Windows reports a failed non-blocking connect only in exceptfds (POSIX: writefds), so watch both.
+            fd_set w,x;FD_ZERO(&w);FD_ZERO(&x);FD_SET(s,&w);FD_SET(s,&x);timeval tv{0,100000};if(select(int(s)+1,nullptr,&w,&x,&tv)>0){int e=0;
 #ifdef _WIN32
 int n=sizeof(e);
 #else
