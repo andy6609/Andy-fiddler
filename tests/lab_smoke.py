@@ -169,7 +169,8 @@ def v2(tmp, h1):
     tunnels = [f for f in flows if f["method"] == "CONNECT"]
     check(any(t["observed"].get("clientAlpn") == "http/1.1" for t in tunnels), "ALPN http/1.1 recorded on the tunnel")
     # Depending on the client the rejection fails SSL_accept, or arrives right after it (seen with curl/LibreSSL on Windows).
-    check(any("client TLS handshake failed" in t["error"] or "client ended TLS right after the handshake" in t["error"] for t in tunnels),
+    check(any(k in t["error"] for t in tunnels for k in ("client TLS handshake failed", "client ended TLS right after the handshake",
+                                                          "client closed the connection right after the handshake")),
           f"untrusted-CA rejection recorded on the tunnel (tunnel errors: {[t['error'] for t in tunnels]})")
 
 

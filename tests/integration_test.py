@@ -306,10 +306,12 @@ def main():
         rc2, _, _ = curl("--http2", f"https://localhost:{h2port}/f1.json", proxy=proxy)
         rejected = [f for f in wait_settled(engine, before + 2)[before:] if f["method"] == "CONNECT"]
         print(f"  info recorded: {[(f['path'], f['state'], f.get('error', '')) for f in rejected]}")
-        recorded = lambda f: f["state"] == "error" and ("Client TLS" in f.get("error", "") or "TLS read failed" in f.get("error", ""))
+        # Clients differ: an alert during SSL_accept (macOS curl), or a reset / plain close right after it with no alert
+        # (curl + LibreSSL on the Windows runner). Whatever happened must be on the CONNECT flow, not look like a quiet tunnel.
+        recorded = lambda f: (f["state"] == "error" and any(k in f.get("error", "") for k in ("Client TLS", "TLS read failed"))) or bool(f.get("clientClosed"))
         check(rc != 0 and rc2 != 0, "both clients refuse the forged certificate")
         check(len(rejected) == 2 and all(recorded(f) for f in rejected),
-              "the rejection is recorded on each CONNECT flow (HTTP/1.1 and h2 ALPN), whether it fails SSL_accept or arrives after it")
+              "how each client ended the tunnel is recorded on its CONNECT flow (HTTP/1.1 and h2 ALPN)")
 
         print("Passthrough and errors")
         engine.request("POST", "/api/proxy/stop", {})
