@@ -6,7 +6,7 @@
 >
 > **현재 상태 (2026-10-15 두 번째 세션)**: 엔진, `web/app.js`, 테스트가 있다. macOS 개발 호스트에서 빌드, 단위 테스트, curl/nghttpd를 이용한 end-to-end 테스트, headless Chrome UI 조작까지 통과했다. **Windows 빌드, Npcap 실제 캡처, Windows 인증서 저장소, 실제 AI 서비스·에이전트 트래픽은 아직 검증하지 않았다.** 아래에서는 “구현됨”과 “검증됨”을 구분한다.
 
-> **`windows` 브랜치 (2026-10-15 세 번째 세션)**: 사용자 요청 "브랜치 하나 파서 윈도우 버전으로 또 만들어봐". MSVC + vcpkg 빌드, C++17, Windows 전용 기능(프록시 연결 → 프로세스 귀속, 시스템 프록시 켜기/복원), lab v9·v10, GitHub Actions Windows CI 를 추가했다. **Windows 검증은 GitHub Actions 러너(Windows Server 2025)에서 돌린 테스트 결과뿐이다.** 실제 Windows 데스크톱 실행, Npcap 캡처, 인증서 신뢰 설치는 여전히 미검증. 무엇이 확인됐고 무엇이 아닌지, Windows 에서만 다르게 동작한 곳 11개는 [WINDOWS.md](WINDOWS.md) 가 기준이다.
+> **`windows` 브랜치 (2026-10-15 세 번째 세션)**: 사용자 요청 "브랜치 하나 파서 윈도우 버전으로 또 만들어봐". MSVC + vcpkg 빌드, C++17, Windows 전용 기능(프록시 연결 → 프로세스 귀속, 시스템 프록시 켜기/복원), lab v9·v10, GitHub Actions Windows CI 를 추가했다. **Windows 검증은 GitHub Actions 러너(Windows Server 2025)에서 돌린 테스트 결과뿐이다.** 실제 Windows 데스크톱 실행, Npcap 캡처, 인증서 신뢰 설치는 여전히 미검증. 무엇이 확인됐고 무엇이 아닌지, Windows 에서만 다르게 동작한 곳 13개(2026-10-16 provenance 머지 후 2개 추가)는 [WINDOWS.md](WINDOWS.md) 가 기준이다.
 
 관련 문서: [Windows 버전](WINDOWS.md), [오픈소스 조사와 채택한 특징](OPEN-SOURCE-REFERENCES.md), [프로젝트 입구](../README.md).
 
