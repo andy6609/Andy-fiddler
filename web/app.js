@@ -148,7 +148,7 @@
     interfaces: null,
     view: 'flows',                       // 'flows' | 'packets' | 'find' | 'trace'
     // Trace views: search in bodies, and local files -> requests (web/provenance.js does the matching).
-    trace: { query: '', caseSensitive: false, hits: null, hitsTruncated: false, analysis: null, analyzedRevision: -1, running: false, error: '' },
+    trace: { fileFilter: null, query: '', caseSensitive: false, hits: null, hitsTruncated: false, analysis: null, analyzedRevision: -1, running: false, error: '' },
     category: 'all',
     connection: '',                      // flow.connection or packet.key filter
     processPid: null,                    // Windows: flow.process.pid filter
@@ -298,6 +298,7 @@
       S.flows = snap.flows || [];
       S.packets = snap.packets || [];
       S.stats = snap.stats || {};
+      S.localFiles = snap.localFiles || [];
       indexRecords();
     }
     if (snap.capture) S.capture = snap.capture;
@@ -371,7 +372,9 @@
       </div>
       <div id="overlay"></div>
       <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-      <input type="file" id="importFile" class="hidden" accept=".wscope,.json,.pcap,.pcapng,.cap">`;
+      <input type="file" id="importFile" class="hidden" accept=".wscope,.json,.pcap,.pcapng,.cap">
+      <input type="file" id="addFiles" class="hidden" multiple>
+      <input type="file" id="addFolder" class="hidden" multiple webkitdirectory>`;
   }
 
   function renderAll() {
@@ -1517,7 +1520,45 @@
     T.hitsTruncated = r.truncated;
   }
 
-  function traceSidebar() { return ''; }
+  // Local file snapshots: what to trace. Live mode adds them from the browser (the engine never opens paths itself).
+  function traceSidebar() {
+    const files = S.localFiles || [];
+    const cov = new Map((S.trace.analysis?.coverage || []).map((c) => [c.fileId, c]));
+    const head = `<div class="side-heading"><span title="Snapshots of files to look for in captured bodies">LOCAL FILES</span>${OFFLINE ? `<span>${files.length}</span>`
+      : '<span><button class="flat small" data-action="files-add" title="Add files">+ files</button><button class="flat small" data-action="folder-add" title="Add a folder (skips .git and node_modules)">+ folder</button></span>'}</div>`;
+    if (!files.length) {
+      return `${head}<div class="connections"><div class="connection muted small">${OFFLINE ? 'No local files in this report.' : 'Add the files of your experiment repo. Snapshots stay in this session.'}</div></div>`;
+    }
+    const rows = files.map((f) => {
+      const c = cov.get(f.id);
+      const share = c ? (c.binary ? (c.matchedBytes ? `${Math.round(c.ratio * 100)}% bytes` : 'not seen') : `${c.matchedAnchors}/${c.anchorLines} lines`) : '';
+      const active = S.trace.fileFilter === f.id;
+      return `<div class="connection ${active ? 'active' : ''}" data-action="trace-file" data-id="${f.id}" title="${esc(f.name)} · sha256 ${esc(f.sha256 || '')}">
+        <div class="host">${esc(f.name)}</div>
+        <div class="sub">${fmtBytes(f.size)}${share ? ` · ${esc(share)}` : ''}${OFFLINE ? '' : ` · <a href="#" data-action="file-remove" data-id="${f.id}">remove</a>`}</div></div>`;
+    }).join('');
+    return `${head}<div class="connections">${rows}</div>`;
+  }
+
+  const MAX_SNAPSHOT = 2 * 1024 * 1024;
+  async function addLocalFiles(list) {
+    const skipped = { big: 0, ignored: 0 };
+    let added = 0;
+    for (const file of list) {
+      const name = file.webkitRelativePath || file.name;
+      if (/(^|\/)(\.git|node_modules)\//.test(name)) { skipped.ignored++; continue; }
+      if (file.size > MAX_SNAPSHOT) { skipped.big++; continue; }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+      await api('POST', '/api/files', { name, base64: btoa(bin), origin: 'browser' });
+      added++;
+    }
+    const extra = [skipped.big && `${skipped.big} over 2 MiB skipped`, skipped.ignored && `${skipped.ignored} in .git/node_modules skipped`].filter(Boolean).join(', ');
+    toast(`Added ${added} file${added === 1 ? '' : 's'}${extra ? ` (${extra})` : ''}`);
+    await refreshNow();
+    runAnalysis(true);
+  }
 
   function renderTraceCenter() {
     const find = S.view === 'find';
@@ -1790,6 +1831,14 @@
   const ACTIONS = {
     category: (el) => setView(el.dataset.view, el.dataset.cat),
     'trace-rerun': () => runAnalysis(true),
+    'files-add': () => $('#addFiles').click(),
+    'folder-add': () => $('#addFolder').click(),
+    'file-remove': async (el) => { await api('DELETE', `/api/files/${el.dataset.id}`); await refreshNow(); runAnalysis(true); },
+    'trace-file': (el) => {
+      const id = Number(el.dataset.id);
+      S.trace.fileFilter = S.trace.fileFilter === id ? null : id;
+      if (S.view !== 'trace') setView('trace'); else { renderSidebar(); renderTraceTable(); }
+    },
     'trace-case': (el) => { S.trace.caseSensitive = el.checked; runSearch(); renderTraceTable(); renderSidebar(); },
     'trace-hit': (el) => selectTrace('hit', Number(el.dataset.i)),
     'trace-open-flow': (el) => {
@@ -1969,6 +2018,11 @@
       const t = e.target;
       if (t.id === 'stateFilter') { S.stateFilter = t.value; renderTable(); }
       else if (t.id === 'captureDevice') t.title = t.value;
+      else if ((t.id === 'addFiles' || t.id === 'addFolder') && t.files?.length) {
+        const files = [...t.files];
+        t.value = '';
+        try { await addLocalFiles(files); } catch (err) { toast(`Adding files failed: ${err.message}`, true); }
+      }
       else if (t.id === 'importFile' && t.files?.[0]) {
         const file = t.files[0];
         t.value = '';
@@ -2019,6 +2073,7 @@
       S.flows = ARCHIVE.flows || [];
       S.packets = ARCHIVE.packets || [];
       S.stats = { flows: S.flows.length, packets: S.packets.length };
+      S.localFiles = (ARCHIVE.localFiles || []).map(({ base64, ...meta }) => meta);
       indexRecords();
       document.title = `${S.session.name || 'Capture'} · WireScope report`;
       renderAll();
