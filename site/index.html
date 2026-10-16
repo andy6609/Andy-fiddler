@@ -64,7 +64,8 @@
 
   <h2>What's in the demo</h2>
   <ul>
-    <li><strong>11 requests</strong> sent with curl through WireScope to test servers on 127.0.0.1. They cover two made-up agent turns (the second one carries a tool call and its result), an event stream, a gzip body, chunked with a trailer, a 1.5 MiB body that hits the 1 MiB capture limit, three HTTP/2 streams on one connection, and a refused connection. No real AI service is involved.</li>
+    <li><strong>12 requests</strong> sent with curl through WireScope to test servers on 127.0.0.1. They cover three made-up agent turns (the second carries a tool call and its result, the third carries <code>src/config.ts</code> the way file-reading tools do), an event stream, a gzip body, chunked with a trailer, a 1.5 MiB body that hits the 1 MiB capture limit, three HTTP/2 streams on one connection, and a refused connection. No real AI service is involved.</li>
+    <li><strong>3 local files</strong> registered as snapshots: <code>src/main.cpp</code>, <code>src/config.ts</code> and a fake <code>.env</code>, each with a planted canary token.</li>
     <li><strong>12 packets</strong> from a hand-built pcap: a TCP conversation in which one segment arrives out of order, one is retransmitted and one is missing, plus a DNS query. They aren't linked to the requests above, because the demo was recorded on a machine without capture permission.</li>
   </ul>
 
@@ -72,7 +73,8 @@
   <ol>
     <li>Click request <code>#2</code> → <em>Request</em> → <em>Messages</em> to see the conversation inside the body, tool call included.</li>
     <li>Tick <code>#1</code> and <code>#2</code> → <em>Compare</em>. Type <code>metadata.session_id</code> into the ignore box and watch the diff say what it ignored.</li>
-    <li>Request <code>#3</code> → <em>Response</em> → <em>Events</em>. Type <code>delta.text</code> to join the streamed text.</li>
+    <li>Request <code>#4</code> → <em>Response</em> → <em>Events</em>. Type <code>delta.text</code> to join the streamed text.</li>
+    <li><em>Local files → requests</em>: lines 1–8 of <code>src/config.ts</code> show up in request <code>#3</code> once the line numbers the tool added are stripped, and the <code>.env</code> canary shows up nowhere. Click a match to see the file lines and the request lines side by side.</li>
     <li><em>All packets</em> → packet <code>#5</code> → hover the fields to light up their bytes, then open <em>TCP stream</em>. The 21 bytes the capture never saw show up as a gap, not as made-up data.</li>
   </ol>
 

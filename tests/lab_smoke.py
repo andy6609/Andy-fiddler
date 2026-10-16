@@ -530,7 +530,40 @@ def v10(tmp, h1):
           f"--restore brings back {before} (now {after}) and deletes the backup")
 
 
-VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7), ("v8", v8), ("v9", v9), ("v10", v10)]
+def v11(tmp, h1):
+    print("v11_provenance")
+    repo = f"{tmp}/v11repo"
+    os.makedirs(f"{repo}/src", exist_ok=True)
+    os.makedirs(f"{repo}/.git", exist_ok=True)
+    config = "// settings WSCANARY-config-v11a\nexport const timeoutMs = 15000;\nexport const retries = 3;\nexport function client() {\n  return makeClient({ timeoutMs, retries });\n}\n"
+    with open(f"{repo}/src/config.ts", "w") as f:
+        f.write(config)
+    with open(f"{repo}/.env", "w") as f:
+        f.write("KEY=WSCANARY-env-v11b\n")
+    with open(f"{repo}/.git/HEAD", "w") as f:
+        f.write("WSCANARY-git-v11c\n")
+    numbered = "\n".join(f"{n:>6}→{line}" for n, line in enumerate(config.split("\n")[:4], 1))
+    out = f"{tmp}/v11.jsonl"
+    proc = start("v1_flow_recorder", out)   # v1 records the traffic, v11 reads its JSONL
+    try:
+        body = json.dumps({"messages": [{"role": "user", "content": [{"type": "tool_result", "content": numbered}]}]})
+        it.curl("-H", "Content-Type: application/json", "-d", body, f"http://127.0.0.1:{h1}/v1/messages", proxy=18081)
+        it.curl("-d", "telemetry WSCANARY-stray-v11d", f"http://127.0.0.1:{h1}/t", proxy=18081)
+        time.sleep(0.3)
+    finally:
+        stop(proc)
+    rc, text = run("v11_provenance", out, repo)
+    check(rc == 0 and "본 것      WSCANARY-config-v11a" in text and "src/config.ts:1" in text, "canary traced to src/config.ts:1")
+    check("못 본 것   WSCANARY-env-v11b" in text, ".env canary reported as not seen")
+    check("WSCANARY-stray-v11d" in text and "어느 로컬 파일에도 없음" in text, "token with no local origin is listed")
+    check("WSCANARY-git" not in text, ".git is skipped")
+    runs = [l for l in text.splitlines() if "lines " in l and "->" in l]
+    check(len(runs) == 1 and "lines 1-4" in runs[0] and "$.messages[0].content[0].content" in runs[0] and "line-numbers" in runs[0], f"line run 1-4 found in the JSON string ({runs})")
+    rc, text = run("v11_provenance", out, f"{tmp}/missing-dir")
+    check(rc == 1 and "로컬 폴더가 없음" in text, "missing folder is reported, not a crash")
+
+
+VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7), ("v8", v8), ("v9", v9), ("v10", v10), ("v11", v11)]
 
 
 def main():

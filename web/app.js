@@ -142,11 +142,13 @@
   // ---------------------------------------------------------------------------
 
   const S = {
-    token: '', version: '', uiPort: 0, connected: true,
+    token: '', version: '', bodyLimit: 1024 * 1024, uiPort: 0, connected: true,
     revision: 0, session: {}, flows: [], packets: [], stats: {}, capture: {}, proxy: {}, systemProxy: {},
     flowById: new Map(), packetById: new Map(),
     interfaces: null,
-    view: 'flows',                       // 'flows' | 'packets'
+    view: 'flows',                       // 'flows' | 'packets' | 'find' | 'trace'
+    // Trace views: search in bodies, and local files -> requests (web/provenance.js does the matching).
+    trace: { fileFilter: null, query: '', caseSensitive: false, hits: null, hitsTruncated: false, analysis: null, analyzedRevision: -1, running: false, error: '' },
     category: 'all',
     connection: '',                      // flow.connection or packet.key filter
     processPid: null,                    // Windows: flow.process.pid filter
@@ -296,6 +298,7 @@
       S.flows = snap.flows || [];
       S.packets = snap.packets || [];
       S.stats = snap.stats || {};
+      S.localFiles = snap.localFiles || [];
       indexRecords();
     }
     if (snap.capture) S.capture = snap.capture;
@@ -311,6 +314,7 @@
     if (changed) {
       renderTopbar(); renderSidebar(); renderTable(); renderFooter();
       await refreshSelection();
+      if (isTraceView()) scheduleAnalysis();
     }
   }
 
@@ -368,7 +372,9 @@
       </div>
       <div id="overlay"></div>
       <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-      <input type="file" id="importFile" class="hidden" accept=".wscope,.json,.pcap,.pcapng,.cap">`;
+      <input type="file" id="importFile" class="hidden" accept=".wscope,.json,.pcap,.pcapng,.cap">
+      <input type="file" id="addFiles" class="hidden" multiple>
+      <input type="file" id="addFolder" class="hidden" multiple webkitdirectory>`;
   }
 
   function renderAll() {
@@ -541,6 +547,17 @@
         html.push(`<button class="side-item ${active ? 'active' : ''}" data-action="category" data-view="${view}" data-cat="${id}">${icon(ic)}<span>${esc(label)}</span><span>${count}</span></button>`);
       }
     }
+    const traceCount = (S.trace.analysis?.matches.length ?? '') === '' ? '' : S.trace.analysis.matches.length + S.trace.analysis.canaries.sightings.length;
+    html.push('<div class="side-heading"><span title="Search inside bodies, and trace registered local files into requests">TRACE</span></div>');
+    html.push(`<button class="side-item ${S.view === 'find' ? 'active' : ''}" data-action="category" data-view="find" data-cat="all">${icon('list')}<span>Find in bodies</span><span>${S.trace.hits ? S.trace.hits.length : ''}</span></button>`);
+    html.push(`<button class="side-item ${S.view === 'trace' ? 'active' : ''}" data-action="category" data-view="trace" data-cat="all">${icon('layers')}<span>Local files → requests</span><span>${traceCount}</span></button>`);
+    if (isTraceView()) {
+      html.push(traceSidebar());
+      const s = S.session || {};
+      html.push(`<div class="sidebar-footer"><b>Client</b>${esc(s.client || '—')}<br><br><b>Action</b>${esc(s.action || '—')}</div>`);
+      $('#sidebar').innerHTML = html.join('');
+      return;
+    }
     const procs = S.view === 'flows' ? processGroups() : [];
     if (procs.length) {
       html.push(`<div class="side-heading"><span title="Owning process of the client socket, read from the Windows TCP table when the proxy accepted the connection">PROCESSES</span>${S.processPid !== null
@@ -572,13 +589,16 @@
     if (S.view !== view) { S.view = view; S.connection = ''; renderCenter(); }
     S.category = category;
     renderSidebar(); renderTable();
+    if (isTraceView()) scheduleAnalysis(0);
   }
+  const isTraceView = () => S.view === 'find' || S.view === 'trace';
 
   // ---------------------------------------------------------------------------
   // Center: request / packet table
   // ---------------------------------------------------------------------------
 
   function renderCenter() {
+    if (isTraceView()) { renderTraceCenter(); return; }
     const flows = S.view === 'flows';
     $('#center').innerHTML = `
       <div class="center-heading">
@@ -641,7 +661,7 @@
       <td>${statusCell(f)}</td>
       ${showProc ? `<td class="small" title="${esc(f.process?.error || '')}">${f.process ? `${esc(f.process.name || '?')}<span class="path">pid ${esc(f.process.pid ?? '?')}</span>` : ''}</td>` : ''}
       <td class="mono small">${esc(f.protocol)}</td>
-      <td class="mono small">↑ ${fmtBytes(f.requestBytes)}${f.truncated ? ' <span class="badge warn" title="Body larger than the 1 MiB per-direction capture limit">cut</span>' : ''}<span class="path">↓ ${fmtBytes(f.responseBytes)}</span></td>
+      <td class="mono small">↑ ${fmtBytes(f.requestBytes)}${f.truncated ? ' <span class="badge warn" title="Body larger than the ${fmtBytes(S.bodyLimit)} per-direction capture limit">cut</span>' : ''}<span class="path">↓ ${fmtBytes(f.responseBytes)}</span></td>
       <td class="mono small">${esc(fmtDuration(f.duration))}</td>
     </tr>`;
   }
@@ -678,6 +698,7 @@
   function renderTable() {
     const wrap = $('#tableWrap');
     if (!wrap) return;
+    if (isTraceView()) { renderTraceTable(); return; }
     const total = S.view === 'flows' ? S.flows.length : S.packets.length;
     const rows = filteredRows();
     S.visibleIds = rows.map((r) => r.id);
@@ -765,7 +786,7 @@
         <p>Select a request to see its headers, bodies, timing and the packets on its connection. Select a packet to see its fields mapped onto the raw bytes.</p></div>`;
       return;
     }
-    el.innerHTML = S.selected.kind === 'flow' ? flowInspector(S.detail) : packetInspector(S.detail);
+    el.innerHTML = S.selected.kind === 'flow' ? flowInspector(S.detail) : S.selected.kind === 'packet' ? packetInspector(S.detail) : traceInspector(S.selected, S.detail);
     if (keepScroll) $('.inspector-content', el).scrollTop = prev;
     for (const fn of afterRender) fn();
   }
@@ -934,7 +955,7 @@
         <button data-action="body-download" data-side="${side}" title="Download the captured bytes exactly as received">Download</button>
       </div>
       <div class="small muted" style="margin-bottom:8px">${facts.join(' · ')}
-        ${body.truncated ? ' <span class="badge warn">truncated at 1 MiB capture limit</span>' : ''}
+        ${body.truncated ? ' <span class="badge warn">truncated at ${fmtBytes(S.bodyLimit)} capture limit</span>' : ''}
         ${body.sha256 ? `<br><span class="mono">sha256 ${esc(body.sha256)}</span>` : ''}</div>`;
 
     let view = '';
@@ -1450,6 +1471,358 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Trace: find in bodies, local files -> requests
+  // ---------------------------------------------------------------------------
+  //
+  // The matching itself lives in web/provenance.js (shared with node scripts and tests). This part only loads
+  // the full archive, runs the analysis, and draws it. A match says "these bytes were in this request as captured";
+  // it does not say which process read the file.
+
+  const PROV = window.WireScopeProvenance || null;
+
+  // Live mode needs the bodies of every request, so it reads the same archive a session export gives.
+  async function traceArchive() {
+    if (OFFLINE) return ARCHIVE;
+    return JSON.parse(await api('GET', '/api/session/download', undefined, 'text'));
+  }
+
+  let analysisTimer = 0;
+  function scheduleAnalysis(delay = 800) {
+    clearTimeout(analysisTimer);
+    analysisTimer = setTimeout(() => runAnalysis(), delay);
+  }
+
+  async function runAnalysis(force = false) {
+    const T = S.trace;
+    if (!PROV) { T.error = 'provenance.js is not loaded'; renderTraceTable(); return; }
+    if (T.running || (!force && T.analysis && T.analyzedRevision === S.revision)) return;
+    T.running = true;
+    renderTraceTable();
+    const revision = S.revision;
+    try {
+      const archive = await traceArchive();
+      T.analysis = await PROV.analyze(archive);
+      T.files = new Map(PROV.prepareFiles(archive.localFiles).map((f) => [f.id, f]));
+      T.analyzedRevision = revision;
+      T.error = '';
+      if (T.query) runSearch();
+    } catch (e) {
+      T.error = e.message || String(e);
+    } finally {
+      T.running = false;
+    }
+    if (isTraceView()) { renderSidebar(); renderTable(); }
+  }
+
+  function runSearch() {
+    const T = S.trace;
+    if (!T.analysis) return;
+    const r = PROV.search(T.analysis.views, T.query, { caseSensitive: T.caseSensitive });
+    T.hits = T.query ? r.hits : null;
+    T.hitsTruncated = r.truncated;
+  }
+
+  // Local file snapshots: what to trace. Live mode adds them from the browser (the engine never opens paths itself).
+  function traceSidebar() {
+    const files = S.localFiles || [];
+    const cov = new Map((S.trace.analysis?.coverage || []).map((c) => [c.fileId, c]));
+    const head = `<div class="side-heading"><span title="Snapshots of files to look for in captured bodies">LOCAL FILES</span>${OFFLINE ? `<span>${files.length}</span>`
+      : '<span><button class="flat small" data-action="files-add" title="Add files">+ files</button><button class="flat small" data-action="folder-add" title="Add a folder (skips .git and node_modules)">+ folder</button></span>'}</div>`;
+    if (!files.length) {
+      return `${head}<div class="connections"><div class="connection muted small">${OFFLINE ? 'No local files in this report.' : 'Add the files of your experiment repo. Snapshots stay in this session.'}</div></div>`;
+    }
+    const rows = files.map((f) => {
+      const c = cov.get(f.id);
+      const share = c ? (c.binary ? (c.matchedBytes ? `${Math.round(c.ratio * 100)}% bytes` : 'not seen') : `${c.matchedAnchors}/${c.anchorLines} lines`) : '';
+      const active = S.trace.fileFilter === f.id;
+      return `<div class="connection ${active ? 'active' : ''}" data-action="trace-file" data-id="${f.id}" title="${esc(f.name)} · sha256 ${esc(f.sha256 || '')}">
+        <div class="host">${esc(f.name)}</div>
+        <div class="sub">${fmtBytes(f.size)}${share ? ` · ${esc(share)}` : ''}${OFFLINE ? '' : ` · <a href="#" data-action="file-remove" data-id="${f.id}">remove</a>`}</div></div>`;
+    }).join('');
+    return `${head}<div class="connections">${rows}</div>`;
+  }
+
+  const MAX_SNAPSHOT = 2 * 1024 * 1024;
+  async function addLocalFiles(list) {
+    const skipped = { big: 0, ignored: 0 };
+    let added = 0;
+    for (const file of list) {
+      const name = file.webkitRelativePath || file.name;
+      if (/(^|\/)(\.git|node_modules)\//.test(name)) { skipped.ignored++; continue; }
+      if (file.size > MAX_SNAPSHOT) { skipped.big++; continue; }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+      await api('POST', '/api/files', { name, base64: btoa(bin), origin: 'browser' });
+      added++;
+    }
+    const extra = [skipped.big && `${skipped.big} over 2 MiB skipped`, skipped.ignored && `${skipped.ignored} in .git/node_modules skipped`].filter(Boolean).join(', ');
+    toast(`Added ${added} file${added === 1 ? '' : 's'}${extra ? ` (${extra})` : ''}`);
+    await refreshNow();
+    runAnalysis(true);
+  }
+
+  function renderTraceCenter() {
+    const find = S.view === 'find';
+    $('#center').innerHTML = `
+      <div class="center-heading">
+        <h1>${find ? 'Find in bodies' : 'Local files → requests'}</h1><span class="tag" id="rowCount"></span>
+        <div class="spacer"></div>
+        <button class="flat" data-action="trace-rerun" title="Read the session again and redo the analysis">Re-run</button>
+      </div>
+      ${find ? `<div class="searchbar">
+        <input type="search" id="traceQuery" spellcheck="false" placeholder="Text to find in request and response bodies, e.g. WSCANARY-" value="${esc(S.trace.query)}" aria-label="Find in bodies">
+        <label class="small trace-case"><input type="checkbox" data-action="trace-case" ${S.trace.caseSensitive ? 'checked' : ''}> Match case</label>
+      </div>` : ''}
+      <div class="table-wrap" id="tableWrap"></div>`;
+  }
+
+  const transformBadges = (t) => (t.length ? t.map((x) => `<span class="badge">${esc(x)}</span>`).join(' ') : '<span class="muted small">as captured</span>');
+  const sideLabel = (side) => (side === 'request' ? '↑ request' : '↓ response');
+  function flowLabel(id) {
+    const f = S.flowById.get(id) || (S.trace.analysis ? null : null);
+    return f ? `<span class="method ${esc(String(f.method || '').toLowerCase())}">${esc(f.method)}</span> <span class="path" style="display:inline">${esc(f.host)}${esc(f.path)}</span>` : '';
+  }
+  function excerptHtml(x) {
+    const cls = x.hex ? ' class="mono"' : '';
+    return `<span${cls}>${esc(x.before)}<mark>${esc(x.match)}</mark>${esc(x.after)}</span>`;
+  }
+
+  function findTable() {
+    const T = S.trace;
+    if (!T.query) {
+      return `<div class="empty">${icon('list')}<strong>Search inside every body</strong>
+        <p>Bodies are searched after undoing gzip/deflate, JSON escaping, SSE framing, base64 and multipart, so text that left in a JSON string or an attachment is found as you would type it.</p></div>`;
+    }
+    if (!T.hits || !T.hits.length) return `<div class="empty">${icon('list')}<strong>No body contains “${esc(T.query)}”</strong>${limitsNotice()}</div>`;
+    return `${T.hitsTruncated ? '<div class="notice" style="margin:10px 12px 0">Too many hits; the list is cut. Narrow the search.</div>' : ''}
+      <table class="traffic"><colgroup><col style="width:74px"><col style="width:88px"><col style="width:28%"><col style="width:110px"><col></colgroup>
+      <thead><tr><th>Request</th><th>Side</th><th>Where</th><th>How</th><th>Context</th></tr></thead>
+      <tbody>${T.hits.map((h, i) => `<tr data-action="trace-hit" data-i="${i}" class="${S.selected?.kind === 'hit' && S.selected.id === i ? 'selected' : ''}">
+        <td class="id">#${h.flowId}</td><td class="small">${sideLabel(h.side)}</td><td class="mono small" title="${esc(h.locator)}">${esc(h.locator)}</td>
+        <td class="small">${transformBadges(h.transforms)}</td><td class="small trace-excerpt">${excerptHtml(h.excerpt)}</td></tr>`).join('')}</tbody></table>`;
+  }
+
+  // What the analysis could not look at, said plainly next to the results.
+  function limitsNotice() {
+    const a = S.trace.analysis;
+    if (!a) return '';
+    const items = [];
+    if (a.bodyLimit) items.push(`Only the first ${fmtBytes(a.bodyLimit)} of each body is captured, so bytes past that are never searched.`);
+    const cut = a.notes.filter((n) => /only the first/.test(n.note)).length;
+    if (cut) items.push(`${cut} ${cut === 1 ? 'body was' : 'bodies were'} cut at that limit.`);
+    for (const n of a.notes.filter((x) => !/only the first/.test(x.note)).slice(0, 5)) items.push(`#${n.flowId} ${n.side}: ${n.note}`);
+    return items.length ? `<div class="notice trace-limits">${items.map(esc).join('<br>')}</div>` : '';
+  }
+
+  function traceStatus() {
+    const T = S.trace;
+    if (T.error) return `<div class="notice error-notice">${esc(T.error)}</div>`;
+    if (OFFLINE && ARCHIVE.redacted) {
+      return `<div class="empty">${icon('layers')}<strong>Nothing to trace in a redacted report</strong>
+        <p>Redaction removed every body and all local file snapshots before this report was written, so there is nothing to search or match.</p></div>`;
+    }
+    if (T.running && !T.analysis) return '<p class="muted small" style="padding:16px">Reading the session and decoding bodies…</p>';
+    return '';
+  }
+
+  function renderTraceTable() {
+    const wrap = $('#tableWrap');
+    if (!wrap || !isTraceView()) return;
+    const status = traceStatus();
+    if (status) { wrap.innerHTML = status; return; }
+    if (S.view === 'find') {
+      wrap.innerHTML = findTable();
+      $('#rowCount').textContent = S.trace.hits ? String(S.trace.hits.length) : '';
+      return;
+    }
+    wrap.innerHTML = provenanceTables();
+    $('#rowCount').textContent = S.trace.analysis ? String(traceMatches().length) : '';
+  }
+
+  const traceMatches = () => (S.trace.analysis?.matches || []).filter((m) => S.trace.fileFilter === null || m.fileId === S.trace.fileFilter);
+  const fileRange = (m) => (m.kind === 'bytes' ? `${m.whole ? 'whole file' : 'first ' + fmtBytes(m.bytes)}` : m.fileFrom === m.fileTo ? `line ${m.fileFrom}` : `lines ${m.fileFrom}–${m.fileTo}`);
+  const rangeText = (c) => (c.binary ? (c.matchedBytes ? `bytes 0–${c.matchedBytes}` : '—') : c.ranges.map(([a, b]) => (a === b ? `${a}` : `${a}–${b}`)).join(', ') || '—');
+
+  function provenanceTables() {
+    const a = S.trace.analysis;
+    if (!a) return '';
+    if (!a.files.length) {
+      return `<div class="empty">${icon('layers')}<strong>No local files registered</strong>
+        <p>Add the files of your experiment repository. Each request and response body is then checked for runs of their lines (or their exact bytes, for binary files) and for planted canary tokens.</p>
+        ${OFFLINE ? '' : '<div class="actions"><button class="primary" data-action="folder-add">Add a folder</button><button data-action="files-add">Add files</button></div>'}</div>`;
+    }
+    const canaries = a.canaries;
+    const perFile = (id) => {
+      const tokens = canaries.sightings.filter((x) => x.from.some((f) => f.fileId === id)).length;
+      const missing = canaries.notSeen.filter((x) => x.from.some((f) => f.fileId === id)).length;
+      return { tokens, missing };
+    };
+    const coverageRows = a.coverage.map((c) => {
+      const reqs = [...new Set(a.matches.filter((m) => m.fileId === c.fileId).map((m) => m.flowId))];
+      const k = perFile(c.fileId);
+      const share = c.binary ? (c.matchedBytes ? `${Math.round(c.ratio * 100)}% of bytes` : 'not seen') : `${c.matchedAnchors} / ${c.anchorLines} lines`;
+      return `<tr class="${S.trace.fileFilter === c.fileId ? 'selected' : ''}" data-action="trace-file" data-id="${c.fileId}">
+        <td class="small" title="${esc(c.fileName)}">${esc(c.fileName)}</td><td class="mono small">${esc(share)}</td>
+        <td class="mono small">${esc(rangeText(c))}</td>
+        <td class="mono small">${k.tokens ? `${k.tokens} seen` : ''}${k.missing ? `${k.tokens ? ', ' : ''}${k.missing} not seen` : ''}${!k.tokens && !k.missing ? '—' : ''}</td>
+        <td class="mono small">${reqs.length ? reqs.map((id) => `#${id}`).join(' ') : '—'}</td></tr>`;
+    }).join('');
+    const matches = traceMatches();
+    const matchRows = matches.map((m, i) => `<tr data-action="trace-match" data-i="${i}" class="${S.selected?.kind === 'match' && S.selected.id === i ? 'selected' : ''}">
+      <td class="small" title="${esc(m.fileName)}">${esc(m.fileName)}</td><td class="mono small">${esc(fileRange(m))}</td>
+      <td class="id">#${m.flowId}</td><td class="small">${sideLabel(m.side)}</td>
+      <td class="mono small" title="${esc(m.locator)}">${esc(m.locator)}</td><td class="small">${transformBadges(m.transforms)}</td></tr>`).join('');
+    const canaryRows = [
+      ...canaries.sightings.map((x, i) => `<tr data-action="trace-canary" data-i="${i}" class="${S.selected?.kind === 'canary' && S.selected.id === i ? 'selected' : ''}">
+        <td class="mono small">${esc(x.token)}</td><td class="small">${x.from.length ? x.from.map((f) => esc(`${f.fileName}${f.line ? `:${f.line}` : ''}`)).join(', ') : '<span class="badge warn">not in any local file</span>'}</td>
+        <td class="mono small">#${x.flowId} ${sideLabel(x.side)}</td><td class="mono small" title="${esc(x.locator)}">${esc(x.locator)}</td></tr>`),
+      ...canaries.notSeen.map((x) => `<tr><td class="mono small">${esc(x.token)}</td><td class="small">${x.from.map((f) => esc(`${f.fileName}${f.line ? `:${f.line}` : ''}`)).join(', ')}</td>
+        <td class="small muted" colspan="2">not seen in any captured body</td></tr>`),
+    ].join('');
+    return `
+      <div class="trace-section"><div class="section-title"><span>Coverage per file</span><span class="muted">meaningful lines (not blank, not just brackets) that appeared in a run</span></div>
+        <table class="traffic"><colgroup><col style="width:30%"><col style="width:120px"><col><col style="width:110px"><col style="width:120px"></colgroup>
+        <thead><tr><th>File</th><th>Seen</th><th>Ranges</th><th>Canaries</th><th>Requests</th></tr></thead><tbody>${coverageRows}</tbody></table></div>
+      <div class="trace-section"><div class="section-title"><span>Matches${S.trace.fileFilter !== null ? ' for the selected file' : ''}</span><span class="muted">${matches.length}</span></div>
+        ${matches.length ? `<table class="traffic"><colgroup><col style="width:22%"><col style="width:96px"><col style="width:58px"><col style="width:88px"><col><col style="width:150px"></colgroup>
+        <thead><tr><th>File</th><th>Part</th><th>Request</th><th>Side</th><th>Where</th><th>How</th></tr></thead><tbody>${matchRows}</tbody></table>`
+          : '<p class="muted small" style="padding:0 12px">No run of lines or bytes from these files was found in any captured body.</p>'}</div>
+      ${canaryRows ? `<div class="trace-section"><div class="section-title"><span>Canary tokens</span><span class="muted">WSCANARY-… markers planted in files</span></div>
+        <table class="traffic"><colgroup><col style="width:190px"><col style="width:26%"><col style="width:150px"><col></colgroup>
+        <thead><tr><th>Token</th><th>From</th><th>Seen in</th><th>Where</th></tr></thead><tbody>${canaryRows}</tbody></table></div>` : ''}
+      ${limitsNotice()}`;
+  }
+
+  function traceList(kind = S.view === 'find' ? 'hit' : 'match') {
+    if (kind === 'hit') return S.trace.hits || [];
+    if (kind === 'canary') return S.trace.analysis?.canaries.sightings || [];
+    return traceMatches();
+  }
+
+  function selectTrace(kind, i) {
+    const item = traceList(kind)[i];
+    if (!item) return;
+    S.selected = { kind, id: i };
+    S.detail = item;
+    for (const tr of $$('#tableWrap tr.selected')) tr.classList.remove('selected');
+    const row = $(`#tableWrap tr[data-action="trace-${kind}"][data-i="${i}"]`);
+    if (row) { row.classList.add('selected'); row.scrollIntoView({ block: 'nearest' }); }
+    renderInspector();
+  }
+  function moveTraceSelection(delta) {
+    const list = traceList();
+    if (!list.length) return;
+    const kind = S.view === 'find' ? 'hit' : 'match';
+    const cur = S.selected?.kind === kind ? S.selected.id : -1;
+    selectTrace(kind, cur < 0 ? (delta > 0 ? 0 : list.length - 1) : Math.max(0, Math.min(list.length - 1, cur + delta)));
+  }
+
+  function traceInspector(sel, item) {
+    if (sel.kind === 'hit') return hitInspector(item);
+    if (sel.kind === 'canary') return canaryInspector(item);
+    return matchInspector(item);
+  }
+
+  // Each transform in plain words, so "how did this match" never needs guessing.
+  const TRANSFORM_TEXT = {
+    gzip: 'Content-Encoding gzip undone', deflate: 'Content-Encoding deflate undone', json: 'a JSON string value, unescaped',
+    sse: 'one server-sent event', join: 'the same field joined across events in order', base64: 'base64 decoded',
+    multipart: 'one multipart/form-data part', form: 'a urlencoded form field, percent-decoded', 'line-numbers': 'line-number prefixes removed (tool output)',
+  };
+  const transformList = (t) => (t.length ? t.map((x) => `<li><span class="badge">${esc(x)}</span> ${esc(TRANSFORM_TEXT[x] || '')}</li>`).join('') : '<li>bytes as captured, nothing undone</li>');
+  const findView = (m) => (S.trace.analysis?.views || []).find((v) => v.flowId === m.flowId && v.side === m.side && v.locator === m.locator);
+
+  // Numbered lines with a highlighted range and a little context on each side.
+  function linesBlock(text, from, to, { context = 2, unnumber = false } = {}) {
+    let lines = text.split('\n');
+    if (unnumber) lines = PROV.splitLines(text).lines;
+    const a = Math.max(1, from - context), b = Math.min(lines.length, to + context);
+    const rows = [];
+    for (let n = a; n <= b; n++) {
+      const inside = n >= from && n <= to;
+      rows.push(`<div class="trace-line${inside ? ' hit' : ''}"><span>${n}</span>${esc(lines[n - 1])}</div>`);
+    }
+    return `<div class="trace-lines">${rows.join('')}</div>`;
+  }
+  const hexOf = (str, max = 64) => Array.from(str.slice(0, max), (c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ') + (str.length > max ? ' …' : '');
+
+  function inspectorButtons(flowId, side) {
+    return `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+      <button class="primary" data-action="trace-open-flow" data-id="${flowId}" data-side="${side}">Open request #${flowId}</button>
+      <button data-action="trace-open-packets" data-id="${flowId}">Packets on its connection</button></div>
+      <p class="small muted" style="margin-top:14px">This shows the bytes were inside the captured ${esc(side)}. It does not show which process read the file, or that nothing else was sent.</p>`;
+  }
+
+  function matchInspector(m) {
+    const file = S.trace.files?.get(m.fileId);
+    const view = findView(m);
+    let fileBlock = '', viewBlock = '';
+    if (m.kind === 'bytes') {
+      fileBlock = `<pre class="code">${esc(hexOf(file ? file.text : ''))}</pre>`;
+      viewBlock = view ? `<pre class="code">${esc(hexOf(view.text.slice(m.viewOffset)))}</pre><p class="small muted">at byte offset ${m.viewOffset} of that view</p>` : '';
+    } else {
+      fileBlock = file ? linesBlock(file.text, m.fileFrom, m.fileTo) : '';
+      viewBlock = view ? linesBlock(view.text, m.viewFrom, m.viewTo, { unnumber: m.transforms.includes('line-numbers') }) : '';
+    }
+    return `
+      <div class="inspector-header">
+        <div class="inspector-title"><strong>${esc(m.fileName)} · ${esc(fileRange(m))}</strong></div>
+        <div class="inspector-url">→ request #${m.flowId} ${sideLabel(m.side)} · ${flowLabel(m.flowId)}</div>
+      </div>
+      <div class="inspector-content">
+        <dl class="kv">
+          <dt>kind</dt><dd>${esc(m.kind === 'bytes' ? 'exact bytes' : m.kind === 'fragment' ? 'long line quoted inside other text' : 'run of consecutive lines')}</dd>
+          <dt>where</dt><dd>${esc(m.locator)}</dd>
+        </dl>
+        <div class="section" style="margin-top:14px"><div class="section-title">How it matched</div><ul class="trace-how">${transformList(m.transforms)}</ul></div>
+        <div class="section"><div class="section-title"><span>In the local file</span><span class="muted mono">${esc(m.fileName)}</span></div>${fileBlock}</div>
+        <div class="section"><div class="section-title"><span>In the ${esc(m.side)}</span><span class="muted mono">${esc(m.locator)}</span></div>${viewBlock}</div>
+        ${inspectorButtons(m.flowId, m.side)}
+      </div>`;
+  }
+
+  function canaryInspector(x) {
+    const view = findView(x);
+    const context = view ? `<pre class="code">${esc(view.text.slice(Math.max(0, x.offset - 80), x.offset))}<mark>${esc(x.token)}</mark>${esc(view.text.slice(x.offset + x.token.length, x.offset + x.token.length + 80))}</pre>` : '';
+    return `
+      <div class="inspector-header">
+        <div class="inspector-title"><strong class="mono">${esc(x.token)}</strong></div>
+        <div class="inspector-url">→ request #${x.flowId} ${sideLabel(x.side)} · ${flowLabel(x.flowId)}</div>
+      </div>
+      <div class="inspector-content">
+        <dl class="kv">
+          <dt>planted in</dt><dd>${x.from.length ? x.from.map((f) => esc(`${f.fileName}${f.line ? `:${f.line}` : ''}`)).join('<br>') : 'no registered local file contains this token'}</dd>
+          <dt>where</dt><dd>${esc(x.locator)}</dd>
+        </dl>
+        <div class="section" style="margin-top:14px"><div class="section-title">How it was read</div><ul class="trace-how">${transformList(x.transforms)}</ul></div>
+        <div class="section"><div class="section-title">Context</div>${context}</div>
+        ${inspectorButtons(x.flowId, x.side)}
+      </div>`;
+  }
+
+  function hitInspector(h) {
+    return `
+      <div class="inspector-header">
+        <div class="inspector-title"><strong>Found in request #${h.flowId}</strong></div>
+        <div class="inspector-url">${flowLabel(h.flowId)}</div>
+      </div>
+      <div class="inspector-content">
+        <dl class="kv">
+          <dt>side</dt><dd>${esc(h.side)}</dd>
+          <dt>where</dt><dd>${esc(h.locator)}</dd>
+          <dt>how</dt><dd>${transformBadges(h.transforms)}</dd>
+          <dt>offset</dt><dd>${esc(h.offset)} in that view${h.binary ? ' (bytes)' : ' (characters)'}</dd>
+        </dl>
+        <div class="section" style="margin-top:14px"><div class="section-title">Context</div><pre class="code">${excerptHtml(h.excerpt)}</pre></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="primary" data-action="trace-open-flow" data-id="${h.flowId}" data-side="${h.side}">Open request #${h.flowId}</button>
+          <button data-action="trace-open-packets" data-id="${h.flowId}">Packets on its connection</button>
+        </div>
+      </div>`;
+  }
+
+  // ---------------------------------------------------------------------------
   // Dialogs
   // ---------------------------------------------------------------------------
 
@@ -1599,6 +1972,31 @@
 
   const ACTIONS = {
     category: (el) => setView(el.dataset.view, el.dataset.cat),
+    'trace-rerun': () => runAnalysis(true),
+    'files-add': () => $('#addFiles').click(),
+    'folder-add': () => $('#addFolder').click(),
+    'file-remove': async (el) => { await api('DELETE', `/api/files/${el.dataset.id}`); await refreshNow(); runAnalysis(true); },
+    'trace-file': (el) => {
+      const id = Number(el.dataset.id);
+      S.trace.fileFilter = S.trace.fileFilter === id ? null : id;
+      if (S.view !== 'trace') setView('trace'); else { renderSidebar(); renderTraceTable(); }
+    },
+    'trace-case': (el) => { S.trace.caseSensitive = el.checked; runSearch(); renderTraceTable(); renderSidebar(); },
+    'trace-hit': (el) => selectTrace('hit', Number(el.dataset.i)),
+    'trace-match': (el) => selectTrace('match', Number(el.dataset.i)),
+    'trace-canary': (el) => selectTrace('canary', Number(el.dataset.i)),
+    'trace-open-flow': (el) => {
+      S.flowTab = el.dataset.side === 'response' ? 'response' : 'request';
+      S.view = 'flows'; S.category = 'all'; S.connection = '';
+      renderSidebar(); renderCenter(); renderTable();
+      return select('flow', Number(el.dataset.id));
+    },
+    'trace-open-packets': (el) => {
+      S.flowTab = 'packets';
+      S.view = 'flows'; S.category = 'all'; S.connection = '';
+      renderSidebar(); renderCenter(); renderTable();
+      return select('flow', Number(el.dataset.id));
+    },
     connection: (el) => { S.connection = S.connection === el.dataset.key ? '' : el.dataset.key; renderSidebar(); renderTable(); },
     'clear-connection': () => { S.connection = ''; renderSidebar(); renderTable(); },
     process: (el) => { const pid = Number(el.dataset.pid); S.processPid = S.processPid === pid ? null : pid; renderSidebar(); renderTable(); },
@@ -1746,8 +2144,10 @@
 
     const filterLater = debounce(() => renderTable(), 120);
     const ignoreLater = debounce(() => { const c = $('#cmpContent'); if (c) c.innerHTML = compareContent(); }, 250);
+    const searchLater = debounce(() => { runSearch(); renderTraceTable(); renderSidebar(); }, 250);
     document.addEventListener('input', (e) => {
       const t = e.target;
+      if (t.id === 'traceQuery') { S.trace.query = t.value; searchLater(); return; }
       if (t.id === 'search') { S.search[S.view] = t.value; filterLater(); }
       else if (t.id === 'cmpIgnore') { S.cmp.ignore = t.value; ignoreLater(); }
       else if (t.dataset?.input === 'sse-join') {
@@ -1762,6 +2162,11 @@
       const t = e.target;
       if (t.id === 'stateFilter') { S.stateFilter = t.value; renderTable(); }
       else if (t.id === 'captureDevice') t.title = t.value;
+      else if ((t.id === 'addFiles' || t.id === 'addFolder') && t.files?.length) {
+        const files = [...t.files];
+        t.value = '';
+        try { await addLocalFiles(files); } catch (err) { toast(`Adding files failed: ${err.message}`, true); }
+      }
       else if (t.id === 'importFile' && t.files?.[0]) {
         const file = t.files[0];
         t.value = '';
@@ -1790,6 +2195,7 @@
       const ids = S.visibleIds;
       if (!ids.length) return;
       e.preventDefault();
+      if (isTraceView()) { moveTraceSelection(down ? 1 : -1); return; }
       const kind = S.view === 'flows' ? 'flow' : 'packet';
       const current = S.selected?.kind === kind ? ids.indexOf(S.selected.id) : -1;
       const next = current < 0 ? (down ? 0 : ids.length - 1) : Math.max(0, Math.min(ids.length - 1, current + (down ? 1 : -1)));
@@ -1807,9 +2213,11 @@
     bindEvents();
     if (OFFLINE) {
       S.session = ARCHIVE.session || {};
+      S.bodyLimit = ARCHIVE.bodyLimit || S.bodyLimit;
       S.flows = ARCHIVE.flows || [];
       S.packets = ARCHIVE.packets || [];
       S.stats = { flows: S.flows.length, packets: S.packets.length };
+      S.localFiles = (ARCHIVE.localFiles || []).map(({ base64, ...meta }) => meta);
       indexRecords();
       document.title = `${S.session.name || 'Capture'} · WireScope report`;
       renderAll();
@@ -1818,7 +2226,7 @@
     try {
       const res = await fetch('/api/bootstrap', { cache: 'no-store' });
       const boot = await res.json();
-      S.token = boot.token; S.version = boot.version; S.uiPort = boot.uiPort;
+      S.token = boot.token; S.bodyLimit = boot.bodyLimit || S.bodyLimit; S.version = boot.version; S.uiPort = boot.uiPort;
     } catch (e) {
       document.getElementById('app').innerHTML = `<div class="empty"><strong>Cannot reach the WireScope engine</strong><p>${esc(e.message)}</p></div>`;
       return;

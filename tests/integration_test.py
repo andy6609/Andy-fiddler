@@ -335,6 +335,16 @@ def main():
         check(refused_seconds < 6, f"refused upstream noticed without waiting for the 10 s timeout ({refused_seconds:.1f} s)")
         engine.request("POST", "/api/proxy/stop", {})
 
+        print("Local file snapshots")
+        secret = "API_KEY=WSCANARY-env-7f3a\n".encode()
+        status, r = engine.request("POST", "/api/files", {"name": ".env", "base64": base64.b64encode(secret).decode()})
+        check(status == 200 and r["id"] == 1, "local file registered through the API")
+        listing = engine.request("GET", "/api/files")[1]
+        check(listing[0]["name"] == ".env" and listing[0]["size"] == len(secret) and "base64" not in listing[0], "file list carries metadata only")
+        check(base64.b64decode(engine.request("GET", "/api/files/1")[1]["base64"]) == secret, "snapshot bytes returned exactly")
+        check(engine.request("POST", "/api/files", {"name": "huge", "base64": base64.b64encode(b"x" * (2 * 1024 * 1024 + 1)).decode()})[0] == 400, "over-limit snapshot rejected")
+        check(engine.request("GET", "/api/state")[1]["localFiles"][0]["name"] == ".env", "state lists local files")
+
         print("Exports and imports")
         status, html = engine.request("POST", "/api/report", {"redact": True}, raw=True)
         text = html.decode()
@@ -342,12 +352,18 @@ def main():
         enc = text.split("atob('")[1].split("')")[0]
         archive = json.loads(base64.b64decode(enc))
         check(archive["redacted"] and all(not f["request"]["body"]["base64"] for f in archive["flows"]) and archive["packets"] == [], "redacted report has no bodies or packets")
+        check(archive["localFiles"] == [] and "WSCANARY-env" not in text, "redacted report leaves local file snapshots out")
+        check("WireScopeProvenance" in text and text.index("WireScopeProvenance") < text.index("ARCHIVE = window.WIRESCOPE_ARCHIVE"), "report inlines provenance.js before app.js")
+        status, js = engine.request("GET", "/provenance.js", raw=True, token=False)
+        check(status == 200 and b"WireScopeProvenance" in js, "engine serves /provenance.js")
         status, html = engine.request("POST", "/api/report", {"redact": False, "ids": [up["id"]]}, raw=True)
         archive = json.loads(base64.b64decode(html.decode().split("atob('")[1].split("')")[0]))
         check(len(archive["flows"]) == 1 and base64.b64decode(archive["flows"][0]["request"]["body"]["base64"]) == payload, "selected-flow report keeps the raw body")
         with open(f"{tmp}/report.html", "wb") as f:
             f.write(html)
         status, saved = engine.request("GET", "/api/session/download", raw=True)
+        check(json.loads(saved)["localFiles"][0]["name"] == ".env" and json.loads(saved)["bodyLimit"] == 1024 * 1024, "session archive keeps snapshots and the body limit")
+        check(engine.request("DELETE", "/api/files/1")[0] == 200 and engine.request("GET", "/api/files")[1] == [], "snapshot deleted")
         count = len(engine.flows())
         engine.request("POST", "/api/session/new", {"name": "empty"})
         check(len(engine.flows()) == 0, "new session clears records")

@@ -47,6 +47,11 @@ if(BUILD_TESTING)
   # End-to-end tests: real curl -> WireScope (or lab/) -> local HTTP/HTTPS/HTTP-2 servers.
   # HTTP/2 upstream: nghttpd when installed (macOS/Linux), otherwise tests/h2_server.py on the
   # Python 'h2' package (pip install h2) — the Windows path, since nghttpd has no Windows build.
+  # web/provenance.js is plain JavaScript; its tests run in node when node is installed.
+  find_program(NODE_EXECUTABLE node)
+  if(NODE_EXECUTABLE)
+    add_test(NAME provenance COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/provenance_test.mjs)
+  endif()
   find_package(Python3 COMPONENTS Interpreter)
   find_program(NGHTTPD_EXECUTABLE nghttpd HINTS /opt/homebrew/opt/nghttp2/bin /usr/local/opt/nghttp2/bin)
   find_program(CURL_EXECUTABLE curl)
@@ -65,6 +70,10 @@ if(BUILD_TESTING)
   if(Python3_Interpreter_FOUND AND CURL_EXECUTABLE AND OPENSSL_EXECUTABLE AND h2_server_found)
     add_test(NAME integration COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.py $<TARGET_FILE_DIR:WireScope>)
     set_tests_properties(integration PROPERTIES ENVIRONMENT "${test_env}" TIMEOUT 240)
+    if(NODE_EXECUTABLE)
+      add_test(NAME experiment001 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/experiment_dryrun_test.py $<TARGET_FILE_DIR:WireScope>)
+      set_tests_properties(experiment001 PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1" TIMEOUT 180)
+    endif()
     if(WIRESCOPE_BUILD_LAB)
       add_test(NAME lab COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/lab_smoke.py ${CMAKE_BINARY_DIR})
       set_tests_properties(lab PROPERTIES ENVIRONMENT "${test_env}" TIMEOUT 300)
