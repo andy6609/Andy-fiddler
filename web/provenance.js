@@ -143,6 +143,48 @@
     return views;
   }
 
+  // multipart/form-data: the classic upload form (claude.ai used plain multipart in the internship captures).
+  // Split on the boundary at the byte level, then each part becomes a view named after its form field.
+  function multipartViews(flow, side, transforms, bytes, contentType) {
+    const m = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType);
+    if (!m) return [];
+    const boundary = `--${m[1] || m[2]}`;
+    const all = latin1(bytes);
+    const views = [];
+    let pos = all.indexOf(boundary);
+    let index = 0;
+    while (pos >= 0) {
+      const start = pos + boundary.length;
+      if (all.startsWith('--', start)) break;                    // closing boundary
+      const next = all.indexOf(`\r\n${boundary}`, start);
+      const end = next < 0 ? all.length : next;                  // last part may be cut by the capture limit
+      const part = all.slice(start, end).replace(/^\r\n/, '');
+      const split = part.indexOf('\r\n\r\n');
+      if (split >= 0) {
+        const head = part.slice(0, split);
+        const disposition = /content-disposition:[^\r\n]*/i.exec(head);
+        const name = disposition && /\bname="([^"]*)"/i.exec(disposition[0]);
+        const file = disposition && /filename="([^"]*)"/i.exec(disposition[0]);
+        const locator = `part[${index}]${name ? ` name="${name[1]}"` : ''}${file ? ` filename="${file[1]}"` : ''}`;
+        const content = part.slice(split + 4);
+        const contentBytes = new Uint8Array(content.length);
+        for (let i = 0; i < content.length; i++) contentBytes[i] = content.charCodeAt(i);
+        views.push(bytesView(flow, side, locator, [...transforms, 'multipart'], contentBytes));
+      }
+      index++;
+      if (next < 0) break;
+      pos = next + 2;
+    }
+    return views;
+  }
+
+  // application/x-www-form-urlencoded: one view per field, percent-decoded.
+  function formViews(flow, side, transforms, text) {
+    const views = [];
+    for (const [k, v] of new URLSearchParams(text)) if (v.length >= MIN_STRING) views.push(makeView(flow, side, `form.${k}`, [...transforms, 'form'], v));
+    return views;
+  }
+
   // A view is { flowId, side, locator, transforms, text, binary }. `notes` collects what could not be looked at.
   // Binary views carry the bytes as a latin1 string (one char per byte) so exact byte runs can be found with indexOf.
   function makeView(flow, side, locator, transforms, text, binary = false) {
@@ -190,9 +232,12 @@
       }
     }
     const views = [];
-    if (!isMostlyText(base)) { views.push(makeView(flow, side, 'body', transforms, latin1(base), true)); return views; }
+    const contentType = headerValue(msg.headers, 'content-type');
+    if (/multipart\/form-data/i.test(contentType)) views.push(...multipartViews(flow, side, transforms, base, contentType));
+    if (!isMostlyText(base)) { views.unshift(makeView(flow, side, 'body', transforms, latin1(base), true)); return views; }
     const text = decodeText(base);
-    views.push(makeView(flow, side, 'body', transforms, text));
+    if (/x-www-form-urlencoded/i.test(contentType)) views.push(...formViews(flow, side, transforms, text));
+    views.unshift(makeView(flow, side, 'body', transforms, text));
     const parsed = tryJson(text);
     if (parsed.ok) {
       const strings = jsonStrings(parsed.value, '$', []);

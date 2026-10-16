@@ -112,6 +112,26 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(views.length === 1 && views[0].binary && views[0].text.length === raw.length, 'binary bodies become one binary view');
 }
 
+// --- multipart and form ------------------------------------------------------------
+{
+  const docx = Buffer.concat([Buffer.from('PK\x03\x04'), Buffer.alloc(300, 0), Buffer.from('WSCANARY-docx-5')]);
+  const b = 'XyZ123';
+  const body = Buffer.concat([
+    Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nassistants upload\r\n`),
+    Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="report.docx"\r\nContent-Type: application/octet-stream\r\n\r\n`), docx,
+    Buffer.from(`\r\n--${b}--\r\n`),
+  ]);
+  const { views } = await P.archiveViews({ flows: [flow(50, { req: body, reqHeaders: [['Content-Type', `multipart/form-data; boundary=${b}`]] })] });
+  const filePart = views.find((v) => v.locator === 'part[1] name="file" filename="report.docx"');
+  check(filePart && filePart.binary && filePart.text === P.latin1(new Uint8Array(docx)), 'multipart file part keeps the exact bytes and its form field name');
+  check(views.some((v) => v.locator === 'part[0] name="purpose"' && v.text === 'assistants upload'), 'text parts become text views');
+  check(views[0].locator === 'body', 'the whole body view stays first');
+}
+{
+  const { views } = await P.archiveViews({ flows: [flow(51, { req: 'note=hello%20world%0Aline2&x=1', reqHeaders: [['Content-Type', 'application/x-www-form-urlencoded']] })] });
+  check(views.some((v) => v.locator === 'form.note' && v.text === 'hello world\nline2' && v.transforms.join() === 'form'), 'urlencoded fields are percent-decoded');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
