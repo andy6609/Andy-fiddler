@@ -146,7 +146,9 @@
     revision: 0, session: {}, flows: [], packets: [], stats: {}, capture: {}, proxy: {}, systemProxy: {},
     flowById: new Map(), packetById: new Map(),
     interfaces: null,
-    view: 'flows',                       // 'flows' | 'packets'
+    view: 'flows',                       // 'flows' | 'packets' | 'find' | 'trace'
+    // Trace views: search in bodies, and local files -> requests (web/provenance.js does the matching).
+    trace: { query: '', caseSensitive: false, hits: null, hitsTruncated: false, analysis: null, analyzedRevision: -1, running: false, error: '' },
     category: 'all',
     connection: '',                      // flow.connection or packet.key filter
     processPid: null,                    // Windows: flow.process.pid filter
@@ -311,6 +313,7 @@
     if (changed) {
       renderTopbar(); renderSidebar(); renderTable(); renderFooter();
       await refreshSelection();
+      if (isTraceView()) scheduleAnalysis();
     }
   }
 
@@ -541,6 +544,17 @@
         html.push(`<button class="side-item ${active ? 'active' : ''}" data-action="category" data-view="${view}" data-cat="${id}">${icon(ic)}<span>${esc(label)}</span><span>${count}</span></button>`);
       }
     }
+    const traceCount = (S.trace.analysis?.matches.length ?? '') === '' ? '' : S.trace.analysis.matches.length + S.trace.analysis.canaries.sightings.length;
+    html.push('<div class="side-heading"><span title="Search inside bodies, and trace registered local files into requests">TRACE</span></div>');
+    html.push(`<button class="side-item ${S.view === 'find' ? 'active' : ''}" data-action="category" data-view="find" data-cat="all">${icon('list')}<span>Find in bodies</span><span>${S.trace.hits ? S.trace.hits.length : ''}</span></button>`);
+    html.push(`<button class="side-item ${S.view === 'trace' ? 'active' : ''}" data-action="category" data-view="trace" data-cat="all">${icon('layers')}<span>Local files → requests</span><span>${traceCount}</span></button>`);
+    if (isTraceView()) {
+      html.push(traceSidebar());
+      const s = S.session || {};
+      html.push(`<div class="sidebar-footer"><b>Client</b>${esc(s.client || '—')}<br><br><b>Action</b>${esc(s.action || '—')}</div>`);
+      $('#sidebar').innerHTML = html.join('');
+      return;
+    }
     const procs = S.view === 'flows' ? processGroups() : [];
     if (procs.length) {
       html.push(`<div class="side-heading"><span title="Owning process of the client socket, read from the Windows TCP table when the proxy accepted the connection">PROCESSES</span>${S.processPid !== null
@@ -572,13 +586,16 @@
     if (S.view !== view) { S.view = view; S.connection = ''; renderCenter(); }
     S.category = category;
     renderSidebar(); renderTable();
+    if (isTraceView()) scheduleAnalysis(0);
   }
+  const isTraceView = () => S.view === 'find' || S.view === 'trace';
 
   // ---------------------------------------------------------------------------
   // Center: request / packet table
   // ---------------------------------------------------------------------------
 
   function renderCenter() {
+    if (isTraceView()) { renderTraceCenter(); return; }
     const flows = S.view === 'flows';
     $('#center').innerHTML = `
       <div class="center-heading">
@@ -678,6 +695,7 @@
   function renderTable() {
     const wrap = $('#tableWrap');
     if (!wrap) return;
+    if (isTraceView()) { renderTraceTable(); return; }
     const total = S.view === 'flows' ? S.flows.length : S.packets.length;
     const rows = filteredRows();
     S.visibleIds = rows.map((r) => r.id);
@@ -765,7 +783,7 @@
         <p>Select a request to see its headers, bodies, timing and the packets on its connection. Select a packet to see its fields mapped onto the raw bytes.</p></div>`;
       return;
     }
-    el.innerHTML = S.selected.kind === 'flow' ? flowInspector(S.detail) : packetInspector(S.detail);
+    el.innerHTML = S.selected.kind === 'flow' ? flowInspector(S.detail) : S.selected.kind === 'packet' ? packetInspector(S.detail) : traceInspector(S.selected, S.detail);
     if (keepScroll) $('.inspector-content', el).scrollTop = prev;
     for (const fn of afterRender) fn();
   }
@@ -1450,6 +1468,86 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Trace: find in bodies, local files -> requests
+  // ---------------------------------------------------------------------------
+  //
+  // The matching itself lives in web/provenance.js (shared with node scripts and tests). This part only loads
+  // the full archive, runs the analysis, and draws it. A match says "these bytes were in this request as captured";
+  // it does not say which process read the file.
+
+  const PROV = window.WireScopeProvenance || null;
+
+  // Live mode needs the bodies of every request, so it reads the same archive a session export gives.
+  async function traceArchive() {
+    if (OFFLINE) return ARCHIVE;
+    return JSON.parse(await api('GET', '/api/session/download', undefined, 'text'));
+  }
+
+  let analysisTimer = 0;
+  function scheduleAnalysis(delay = 800) {
+    clearTimeout(analysisTimer);
+    analysisTimer = setTimeout(() => runAnalysis(), delay);
+  }
+
+  async function runAnalysis(force = false) {
+    const T = S.trace;
+    if (!PROV) { T.error = 'provenance.js is not loaded'; renderTraceTable(); return; }
+    if (T.running || (!force && T.analysis && T.analyzedRevision === S.revision)) return;
+    T.running = true;
+    renderTraceTable();
+    const revision = S.revision;
+    try {
+      T.analysis = await PROV.analyze(await traceArchive());
+      T.analyzedRevision = revision;
+      T.error = '';
+      if (T.query) runSearch();
+    } catch (e) {
+      T.error = e.message || String(e);
+    } finally {
+      T.running = false;
+    }
+    if (isTraceView()) { renderSidebar(); renderTable(); }
+  }
+
+  function runSearch() {
+    const T = S.trace;
+    if (!T.analysis) return;
+    const r = PROV.search(T.analysis.views, T.query, { caseSensitive: T.caseSensitive });
+    T.hits = T.query ? r.hits : null;
+    T.hitsTruncated = r.truncated;
+  }
+
+  function traceSidebar() { return ''; }
+
+  function renderTraceCenter() {
+    const find = S.view === 'find';
+    $('#center').innerHTML = `
+      <div class="center-heading">
+        <h1>${find ? 'Find in bodies' : 'Local files → requests'}</h1><span class="tag" id="rowCount"></span>
+        <div class="spacer"></div>
+        <button class="flat" data-action="trace-rerun" title="Read the session again and redo the analysis">Re-run</button>
+      </div>
+      <div class="table-wrap" id="tableWrap"></div>`;
+  }
+
+  function traceStatus() {
+    const T = S.trace;
+    if (T.error) return `<div class="notice error-notice">${esc(T.error)}</div>`;
+    if (T.running && !T.analysis) return '<p class="muted small" style="padding:16px">Reading the session and decoding bodies…</p>';
+    return '';
+  }
+
+  function renderTraceTable() {
+    const wrap = $('#tableWrap');
+    if (!wrap || !isTraceView()) return;
+    const a = S.trace.analysis;
+    wrap.innerHTML = traceStatus() || (a ? `<p class="muted small" style="padding:16px">${a.viewCount} body views from ${S.flows.length} requests.</p>` : '');
+  }
+
+  function traceInspector() { return ''; }
+  function moveTraceSelection() {}
+
+  // ---------------------------------------------------------------------------
   // Dialogs
   // ---------------------------------------------------------------------------
 
@@ -1790,6 +1888,7 @@
       const ids = S.visibleIds;
       if (!ids.length) return;
       e.preventDefault();
+      if (isTraceView()) { moveTraceSelection(down ? 1 : -1); return; }
       const kind = S.view === 'flows' ? 'flow' : 'packet';
       const current = S.selected?.kind === kind ? ids.indexOf(S.selected.id) : -1;
       const next = current < 0 ? (down ? 0 : ids.length - 1) : Math.max(0, Math.min(ids.length - 1, current + (down ? 1 : -1)));
