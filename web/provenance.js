@@ -446,12 +446,30 @@
     return [{ ...base, fileFrom: 0, fileTo: found, bytes: found, viewOffset: foundAt, whole: false }];
   }
 
+  // A distinctive file line (40+ characters) can also travel inside a longer line: a model quoting it in a sentence,
+  // a tool joining lines. Whole-line runs miss that, so look for each long line as a substring and report it as a
+  // 'fragment' when no run already covers it in that view.
+  function fragments(file, view, covered, longLine = 40) {
+    const out = [];
+    const lines = file.text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = norm(lines[i]);
+      if (line.length < longLine || isTrivial(line) || covered.has(i + 1)) continue;
+      const at = view.text.indexOf(line);
+      if (at < 0) continue;
+      out.push({ kind: 'fragment', fileId: file.id, fileName: file.name, fileFrom: i + 1, fileTo: i + 1, lines: 1,
+        viewFrom: lineAt(view.text, at), viewTo: lineAt(view.text, at), viewOffset: at,
+        flowId: view.flowId, side: view.side, locator: view.locator, transforms: view.transforms });
+    }
+    return out;
+  }
+
   // How much of each file showed up anywhere: union of matched line ranges over non-trivial lines.
   function coverage(file, matches) {
     const fileLines = file.text.split('\n').map(norm);
     const anchors = fileLines.map((l, i) => (l && !isTrivial(l) ? i + 1 : 0)).filter(Boolean);
     const covered = new Set();
-    for (const m of matches) if (m.fileId === file.id && m.kind === 'lines') for (let n = m.fileFrom; n <= m.fileTo; n++) covered.add(n);
+    for (const m of matches) if (m.fileId === file.id && m.kind !== 'bytes') for (let n = m.fileFrom; n <= m.fileTo; n++) covered.add(n);
     const matched = anchors.filter((n) => covered.has(n)).length;
     const ranges = [];
     for (const n of [...covered].sort((a, b) => a - b)) {
@@ -476,7 +494,14 @@
       if (v.binary) { for (const f of files) if (f.binary) matches.push(...byteRuns(f, v)); continue; }
       const candidates = new Set();
       for (const line of viewLines(v).lines) for (const f of owners.get(line) || []) candidates.add(f);
-      for (const f of candidates) matches.push(...lineRuns(f, v));
+      for (const f of files) {
+        if (f.binary) continue;
+        const runs = candidates.has(f) ? lineRuns(f, v) : [];
+        matches.push(...runs);
+        const covered = new Set();
+        for (const r of runs) for (let n = r.fileFrom; n <= r.fileTo; n++) covered.add(n);
+        matches.push(...fragments(f, v, covered));
+      }
     }
     // The same file lines in one body are often visible in several views (raw body, joined stream, the event itself).
     // Keep one per body and file range: the most specific location wins (a concrete path, then a join, then the raw body).
@@ -485,6 +510,10 @@
     const best = new Map();
     for (const m of matches) { const k = key(m); if (!best.has(k) || specificity(m) < specificity(best.get(k))) best.set(k, m); }
     matches = [...best.values()];
+    // a fragment only adds information when no run in any view of the same body already covers that line
+    const runLines = new Set();
+    for (const m of matches) if (m.kind === 'lines') for (let n = m.fileFrom; n <= m.fileTo; n++) runLines.add(`${m.fileId}/${m.flowId}/${m.side}/${n}`);
+    matches = matches.filter((m) => m.kind !== 'fragment' || !runLines.has(`${m.fileId}/${m.flowId}/${m.side}/${m.fileFrom}`));
     matches.sort((a, b) => a.flowId - b.flowId || a.fileId - b.fileId || a.fileFrom - b.fileFrom);
     const coverageList = files.map((f) => {
       if (!f.binary) return coverage(f, matches);
@@ -503,5 +532,5 @@
     };
   }
 
-  return { analyze, byteRuns, lineRuns, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  return { analyze, byteRuns, lineRuns, fragments, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });

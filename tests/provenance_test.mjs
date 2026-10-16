@@ -287,6 +287,18 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(hits.length === 2 && hits.every((m) => !m.transforms.includes('join')), 'a range seen in an event and in the joined stream is reported once, at the event');
 }
 
+// --- long lines quoted inside other text ---------------------------------------------------
+{
+  const readme = '# Sandbox repo\nThis repository exists only for the egress experiment.\nshort line\n';
+  const r = await P.analyze({ localFiles: [{ id: 1, name: 'README.md', base64: b64(readme) }],
+    flows: [flow(120, { res: JSON.stringify({ answer: 'The README says: This repository exists only for the egress experiment. That is all.' }) })] });
+  const f = r.matches.find((m) => m.kind === 'fragment');
+  check(f && f.fileFrom === 2 && f.locator === '$.answer', 'a long file line quoted inside a sentence is a fragment match');
+  check(r.coverage[0].matchedAnchors === 1, 'fragments count toward coverage');
+  const none = await P.analyze({ localFiles: [{ id: 1, name: 'README.md', base64: b64(readme) }], flows: [flow(121, { res: JSON.stringify({ answer: 'it has a short line in it' }) })] });
+  check(!none.matches.length, 'short lines are never matched as fragments');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
