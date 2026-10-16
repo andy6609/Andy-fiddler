@@ -132,6 +132,30 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(views.some((v) => v.locator === 'form.note' && v.text === 'hello world\nline2' && v.transforms.join() === 'form'), 'urlencoded fields are percent-decoded');
 }
 
+// --- search ------------------------------------------------------------------------
+{
+  const fileText = 'line A\nsecret = "WSCANARY-env-1"\n';
+  const flows = [
+    flow(60, { req: JSON.stringify({ messages: [{ role: 'user', content: fileText }] }) }),
+    flow(61, { req: 'plain text mentioning wscanary-env-1 in lower case' }),
+    flow(62, { req: Buffer.concat([Buffer.from([0, 0, 1]), Buffer.from('한글 WSCANARY-env-1'), Buffer.from([0, 0, 0, 0, 0])]) }),
+  ];
+  const { views } = await P.archiveViews({ flows });
+  const { hits } = P.search(views, 'WSCANARY-env-1');
+  check(hits.some((h) => h.flowId === 60 && h.locator === '$.messages[0].content'), 'hit inside a JSON string reports its path');
+  check(!hits.some((h) => h.flowId === 60 && h.locator === 'body'), 'raw-body duplicate is dropped when a decoded view matched');
+  check(hits.some((h) => h.flowId === 61 && h.locator === 'body'), 'case-insensitive by default');
+  check(!P.search(views, 'WSCANARY-env-1', { caseSensitive: true }).hits.some((h) => h.flowId === 61), 'case-sensitive on request');
+  const binHit = P.search(views, '한글 WSCANARY').hits.find((h) => h.flowId === 62);
+  check(binHit && binHit.binary && binHit.excerpt.hex, 'non-ASCII query matches inside a binary view as UTF-8 bytes');
+  const one = hits.find((h) => h.flowId === 60);
+  check(one.excerpt.match === 'WSCANARY-env-1' && one.excerpt.before.endsWith('secret = "'), 'excerpt shows the match with context');
+  check(P.search(views, '').hits.length === 0, 'empty query finds nothing');
+  const many = await P.archiveViews({ flows: [flow(63, { req: 'x '.repeat(100) })] });
+  const capped = P.search(many.views, 'x', { perView: 5 });
+  check(capped.hits.length === 5 && capped.truncated, 'hit count is capped per view and the cap is reported');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);

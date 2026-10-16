@@ -258,5 +258,43 @@
     return { views, notes };
   }
 
-  return { b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  // ---------------------------------------------------------------------------
+  // Search across every view
+  // ---------------------------------------------------------------------------
+
+  // Plain substring search. The same text is usually visible twice (escaped in the raw body, unescaped in its
+  // JSON string), so raw-body hits are dropped for a body when a decoded view of that body also matched.
+  function search(views, query, { caseSensitive = false, perView = 20, limit = 2000 } = {}) {
+    if (!query) return { hits: [], truncated: false };
+    const needle = caseSensitive ? query : query.toLowerCase();
+    const needleBytes = latin1(new TextEncoder().encode(query));   // how the query looks inside binary views
+    const hits = [];
+    let truncated = false;
+    for (const v of views) {
+      const hay = v.binary ? v.text : caseSensitive ? v.text : v.text.toLowerCase();
+      const n = v.binary ? needleBytes : needle;
+      let from = 0, count = 0;
+      for (;;) {
+        const at = hay.indexOf(n, from);
+        if (at < 0) break;
+        if (count++ >= perView) { truncated = true; break; }
+        hits.push({ flowId: v.flowId, side: v.side, locator: v.locator, transforms: v.transforms, binary: v.binary, offset: at, length: n.length, excerpt: excerpt(v, at, n.length) });
+        from = at + Math.max(1, n.length);
+      }
+      if (hits.length >= limit) { truncated = true; break; }
+    }
+    const derived = new Set(hits.filter((h) => h.locator !== 'body').map((h) => `${h.flowId}/${h.side}`));
+    return { hits: hits.filter((h) => h.locator !== 'body' || !derived.has(`${h.flowId}/${h.side}`)), truncated };
+  }
+
+  // Up to 60 characters of context on each side; binary views show bytes as hex around the match.
+  function excerpt(view, at, length) {
+    if (view.binary) {
+      const hex = (str) => Array.from(str, (c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ');
+      return { before: hex(view.text.slice(Math.max(0, at - 8), at)), match: hex(view.text.slice(at, at + Math.min(length, 32))), after: hex(view.text.slice(at + length, at + length + 8)), hex: true };
+    }
+    return { before: view.text.slice(Math.max(0, at - 60), at), match: view.text.slice(at, at + length), after: view.text.slice(at + length, at + length + 60), hex: false };
+  }
+
+  return { search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });
