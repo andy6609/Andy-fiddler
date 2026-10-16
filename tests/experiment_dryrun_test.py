@@ -37,11 +37,12 @@ def main():
     server = it.serve(http.server.ThreadingHTTPServer(("127.0.0.1", it.free_port()), it.Handler))
     env = dict(os.environ, FAKE_MODEL_URL=f"http://127.0.0.1:{server.server_address[1]}", PYTHONDONTWRITEBYTECODE="1")
     run = subprocess.run([sys.executable, os.path.join(KIT, "run_agent.py"), "--sandbox", sandbox, "--label", "fake-agent", "--out", out,
-                          "--build", BUILD, "--task", "explain the config", "--", sys.executable, os.path.join(KIT, "fake_agent.py"), "{task}"],
+                          "--build", BUILD, "--task", "explain the config", "--timeout", "60", "--", sys.executable, os.path.join(KIT, "fake_agent.py"), "{task}"],
                          env=env, capture_output=True, text=True)
     print("experiment 001 dry run")
     check(run.returncode == 0, f"run_agent finished {run.stderr[-300:]}")
     meta = json.load(open(os.path.join(out, "run.json")))
+    # a hung agent shows up here as exit "timeout" instead of the whole test running into ctest's limit
     check(meta["exit"] == 0 and meta["requests"] == 6 and meta["localFiles"] == 9, f"agent ran, 6 requests, 9 files registered ({meta})")
     r = json.loads(subprocess.run(["node", os.path.join(ROOT, "scripts", "provenance_cli.mjs"), os.path.join(out, "session.wscope"), "--json"],
                                   capture_output=True, text=True).stdout)

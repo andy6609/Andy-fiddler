@@ -27,7 +27,9 @@ def png_with_text(text):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
     ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
     idat = zlib.compress(b"\x00\xff\x00\x00")
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"tEXt", b"Comment\x00" + text.encode()) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+    # The token must end at a non-token character: the chunk CRC that follows is random bytes, and if they happened
+    # to be letters or digits the canary pattern would read them as part of the token.
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"tEXt", b"Comment\x00" + text.encode() + b";") + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
 
 def files(tokens):
