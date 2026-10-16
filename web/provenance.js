@@ -364,5 +364,65 @@
     return { lines, stripped: false };
   }
 
-  return { splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  // Find runs of consecutive file lines that appear as consecutive lines of a view.
+  // A run counts if it has at least `minAnchors` non-trivial lines, or one non-trivial line of `longLine`+ chars.
+  // Runs are extended diagonally (file line i, view line j) -> (i+1, j+1); each file line keeps its 1-based number.
+  function lineRuns(file, view, { minAnchors = 2, longLine = 40 } = {}) {
+    const fileLines = file.text.split('\n').map(norm);
+    const index = new Map();
+    fileLines.forEach((l, i) => { if (!index.has(l)) index.set(l, []); index.get(l).push(i); });
+    const { lines, stripped } = splitLines(view.text);
+    const viewLines = lines.map(norm);
+    const runs = [];
+    let prev = new Map();                               // file index -> run ending at (i, j-1)
+    const close = (run) => {
+      const ok = run.anchors >= minAnchors || (run.anchors >= 1 && run.longest >= longLine);
+      if (ok) runs.push(run);
+    };
+    for (let j = 0; j < viewLines.length; j++) {
+      const line = viewLines[j];
+      const cur = new Map();
+      const trivial = !line || isTrivial(line);
+      for (const i of index.get(line) || []) {
+        const before = prev.get(i - 1);
+        if (!before && trivial) continue;               // trivial lines only extend
+        const run = before ? { ...before } : { fileFrom: i, viewFrom: j, anchors: 0, longest: 0 };
+        run.fileTo = i;
+        run.viewTo = j;
+        if (!trivial) { run.anchors++; run.longest = Math.max(run.longest, line.length); }
+        cur.set(i, run);
+      }
+      for (const [i, run] of prev) if (!cur.has(i + 1)) close(run);
+      prev = cur;
+    }
+    for (const run of prev.values()) close(run);
+    // keep the longest runs that do not overlap in the view
+    runs.sort((a, b) => (b.viewTo - b.viewFrom) - (a.viewTo - a.viewFrom) || a.fileFrom - b.fileFrom);
+    const taken = [];
+    for (const r of runs) if (!taken.some((t) => r.viewFrom <= t.viewTo && t.viewFrom <= r.viewTo)) taken.push(r);
+    return taken.sort((a, b) => a.viewFrom - b.viewFrom).map((r) => ({
+      kind: 'lines', fileId: file.id, fileName: file.name,
+      fileFrom: r.fileFrom + 1, fileTo: r.fileTo + 1, lines: r.fileTo - r.fileFrom + 1,
+      viewFrom: r.viewFrom + 1, viewTo: r.viewTo + 1,
+      flowId: view.flowId, side: view.side, locator: view.locator,
+      transforms: stripped ? [...view.transforms, 'line-numbers'] : view.transforms,
+    }));
+  }
+
+  // How much of each file showed up anywhere: union of matched line ranges over non-trivial lines.
+  function coverage(file, matches) {
+    const fileLines = file.text.split('\n').map(norm);
+    const anchors = fileLines.map((l, i) => (l && !isTrivial(l) ? i + 1 : 0)).filter(Boolean);
+    const covered = new Set();
+    for (const m of matches) if (m.fileId === file.id && m.kind === 'lines') for (let n = m.fileFrom; n <= m.fileTo; n++) covered.add(n);
+    const matched = anchors.filter((n) => covered.has(n)).length;
+    const ranges = [];
+    for (const n of [...covered].sort((a, b) => a - b)) {
+      const last = ranges[ranges.length - 1];
+      if (last && n === last[1] + 1) last[1] = n; else ranges.push([n, n]);
+    }
+    return { fileId: file.id, fileName: file.name, lines: fileLines.length, anchorLines: anchors.length, matchedAnchors: matched, ratio: anchors.length ? matched / anchors.length : 0, ranges };
+  }
+
+  return { lineRuns, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });

@@ -190,6 +190,53 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(P.isTrivial('});') && P.isTrivial('return') && !P.isTrivial('const apiBase = process.env.API_BASE;'), 'short or punctuation-only lines are trivial');
 }
 
+// --- line runs and coverage -------------------------------------------------------
+{
+  const source = [
+    '#include "net.hpp"',                      // 1
+    '#include "packet.hpp"',                   // 2
+    '',                                         // 3
+    'int main(int argc, char** argv) {',       // 4
+    '    auto options = parseOptions(argc, argv);', // 5
+    '    if (!options.valid) return usage();',  // 6
+    '    return runEngine(options);',           // 7
+    '}',                                        // 8
+    '',                                         // 9
+    'static int usage() {',                     // 10
+    '    std::puts("usage: wirescope [--port N]");', // 11
+    '    return 2;',                            // 12
+    '}',                                        // 13
+  ].join('\n');
+  const [file] = P.prepareFiles([{ id: 9, name: 'src/main.cpp', base64: b64(source) }]);
+  const view = (id, text, transforms = ['json']) => ({ flowId: id, side: 'request', locator: '$.content', transforms, text, binary: false });
+
+  // 1) the agent read lines 4-8 through a numbering tool
+  const partial = source.split('\n').slice(3, 8).map((l, k) => `${String(k + 4).padStart(6)}→${l}`).join('\n');
+  const r1 = P.lineRuns(file, view(80, `Here is the file:\n${partial}\nWhat next?`));
+  check(r1.length === 1 && r1[0].fileFrom === 4 && r1[0].fileTo === 8, 'partial read matches exactly the lines that were sent');
+  check(r1[0].transforms.join() === 'json,line-numbers', 'line-number stripping is recorded');
+
+  // 2) re-indented copy still matches (whitespace-insensitive per line)
+  const r2 = P.lineRuns(file, view(81, source.split('\n').slice(9, 13).map((l) => '  ' + l.trim()).join('\r\n')));
+  check(r2.length === 1 && r2[0].fileFrom === 10 && r2[0].fileTo === 13, 're-indented CRLF copy still matches');
+
+  // 3) a single trivial line is not evidence
+  check(P.lineRuns(file, view(82, 'return 2;\n}\n')).length === 0, 'a lone trivial line does not count as a match');
+
+  // 4) one long distinctive line is enough on its own
+  const r4 = P.lineRuns(file, view(83, 'see:    std::puts("usage: wirescope [--port N]");'.replace('see:', '')));
+  check(r4.length === 1 && r4[0].fileFrom === 11, 'one long distinctive line counts');
+
+  // 5) the end cut off by the capture limit: the cut line is not claimed
+  const cut = source.slice(0, source.indexOf('return runEngine') + 10);
+  const r5 = P.lineRuns(file, view(84, cut));
+  check(r5.length === 1 && r5[0].fileFrom === 1 && r5[0].fileTo === 6, 'a truncated tail only claims whole lines');
+
+  const cov = P.coverage(file, [...r1, ...r5]);
+  check(cov.anchorLines === 9 && cov.matchedAnchors === 6, `coverage counts non-trivial lines only (${cov.matchedAnchors}/${cov.anchorLines})`);
+  check(JSON.stringify(cov.ranges) === '[[1,8]]', 'covered ranges are merged');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
