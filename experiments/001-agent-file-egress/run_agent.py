@@ -126,7 +126,8 @@ def main():
             env.pop("no_proxy", None)
             # NODE_EXTRA_CA_CERTS adds to Node's roots; the others replace the default bundle, which is fine because
             # every connection of this process goes through the proxy and is signed by its local CA.
-            for k in ("NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+            # CODEX_CA_CERTIFICATE: Codex CLI (Rust) reads it before SSL_CERT_FILE (third-party docs; the run shows whether it took).
+            for k in ("NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "CODEX_CA_CERTIFICATE"):
                 env[k] = ca
             started = time.time()
             with open(os.path.join(out, "agent.stdout"), "wb") as so, open(os.path.join(out, "agent.stderr"), "wb") as se:
