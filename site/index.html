@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WireScope</title>
+<meta name="description" content="A C++ traffic inspector that follows one HTTP request down to the TCP connection, the packets and the bytes on the wire.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232169a5' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='8.5'/%3E%3Ccircle cx='12' cy='12' r='3.5'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --ink: #1f2f3e; --muted: #5f7181; --line: #dbe2e9; --paper: #ffffff; --canvas: #f4f6f9;
+    --accent: #2169a5; --accent-ink: #ffffff; --code: #eef2f6; --mono: ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #dde6ee; --muted: #93a5b5; --line: #2b3a48; --paper: #16212c; --canvas: #0f1720; --accent: #5aa2df; --accent-ink: #0f1720; --code: #1d2a37; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--canvas); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 56px 20px 72px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 20px; letter-spacing: -0.3px; }
+  .brand svg { width: 26px; height: 26px; color: var(--accent); }
+  h1 { font-size: clamp(28px, 5vw, 40px); line-height: 1.2; margin: 28px 0 14px; letter-spacing: -0.8px; }
+  p { margin: 0 0 14px; }
+  .lead { font-size: 18px; color: var(--muted); max-width: 680px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 26px 0 34px; }
+  .btn { display: inline-block; padding: 11px 18px; border-radius: 7px; text-decoration: none; font-weight: 600; border: 1px solid var(--line); color: var(--ink); background: var(--paper); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn:hover { filter: brightness(1.06); }
+  figure { margin: 0 0 40px; }
+  figure img { width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--line); display: block; }
+  figcaption { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  h2 { font-size: 20px; margin: 40px 0 12px; letter-spacing: -0.3px; }
+  pre { background: var(--code); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font: 13px/1.6 var(--mono); margin: 0 0 14px; }
+  code { font-family: var(--mono); font-size: 0.92em; }
+  ol, ul { padding-left: 22px; margin: 0 0 14px; }
+  li { margin-bottom: 6px; }
+  .note { border-left: 3px solid var(--accent); padding: 4px 0 4px 14px; color: var(--muted); }
+  footer { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 14px; color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5"/><path d="M12 1.5v5M12 17.5v5M1.5 12h5M17.5 12h5"/></svg>
+    WireScope
+  </div>
+
+  <h1>Follow one HTTP request all the way down to the bytes on the wire.</h1>
+  <p class="lead">WireScope is a traffic inspector I'm building in C++. Pick a request the proxy recorded, then keep going down: the TCP connection it used, the packets that made up that connection, and the byte offset of every header field.</p>
+
+  <div class="actions">
+    <a class="btn primary" href="/demo">Open the demo inspector</a>
+    <a class="btn" href="https://github.com/andy6609/Andy-fiddler">Source on GitHub</a>
+  </div>
+
+  <figure>
+    <img src="/inspector.png" alt="WireScope inspector showing a list of recorded requests and the request body of an agent-style POST" width="1440" height="900">
+    <figcaption>The inspector. The data is local test traffic, not a real AI service.</figcaption>
+  </figure>
+
+  <p class="note">This website can't see your traffic. WireScope runs on your own machine as a local proxy and packet capture. What you can open here is an offline report it exported. The viewer and the data are packed into one HTML file, so it works without the engine.</p>
+
+  <h2>What's in the demo</h2>
+  <ul>
+    <li><strong>11 requests</strong> sent with curl through WireScope to test servers on 127.0.0.1. They cover two made-up agent turns (the second one carries a tool call and its result), an event stream, a gzip body, chunked with a trailer, a 1.5 MiB body that hits the 1 MiB capture limit, three HTTP/2 streams on one connection, and a refused connection. No real AI service is involved.</li>
+    <li><strong>12 packets</strong> from a hand-built pcap: a TCP conversation in which one segment arrives out of order, one is retransmitted and one is missing, plus a DNS query. They aren't linked to the requests above, because the demo was recorded on a machine without capture permission.</li>
+  </ul>
+
+  <h2>Things to try</h2>
+  <ol>
+    <li>Click request <code>#2</code> → <em>Request</em> → <em>Messages</em> to see the conversation inside the body, tool call included.</li>
+    <li>Tick <code>#1</code> and <code>#2</code> → <em>Compare</em>. Type <code>metadata.session_id</code> into the ignore box and watch the diff say what it ignored.</li>
+    <li>Request <code>#3</code> → <em>Response</em> → <em>Events</em>. Type <code>delta.text</code> to join the streamed text.</li>
+    <li><em>All packets</em> → packet <code>#5</code> → hover the fields to light up their bytes, then open <em>TCP stream</em>. The 21 bytes the capture never saw show up as a gap, not as made-up data.</li>
+  </ol>
+
+  <h2>Run it yourself</h2>
+  <pre>git clone https://github.com/andy6609/Andy-fiddler
+cmake -S Andy-fiddler -B build     # needs CMake, a C++17 compiler, OpenSSL 3, nghttp2
+cmake --build build -j
+./build/WireScope --sample         # then open http://127.0.0.1:17890</pre>
+  <p>Windows build steps, client setup and what's verified so far are in the <a href="https://github.com/andy6609/Andy-fiddler#readme">README</a>.</p>
+
+  <footer>
+    Built and tested on macOS and on a GitHub Actions Windows runner. Not yet run on a Windows desktop, and not yet pointed at real AI clients. That's next.
+  </footer>
+</main>
+</body>
+</html>
