@@ -93,6 +93,56 @@
   }
   function tryJson(text) { try { return { ok: true, value: JSON.parse(text) }; } catch { return { ok: false }; } }
 
+  // Server-sent events: a streamed reply arrives in many small events. Each event's data is a view, and
+  // the same JSON field across events is also joined in order (e.g. every delta.text), because text a
+  // model writes back is split across events and would never match piece by piece.
+  function parseSse(text) {
+    const events = [];
+    for (const block of text.split(/\r?\n\r?\n/)) {
+      if (!block.trim()) continue;
+      const data = [];
+      let event = 'message';
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith(':')) continue;
+        const i = line.indexOf(':');
+        const field = i < 0 ? line : line.slice(0, i);
+        let value = i < 0 ? '' : line.slice(i + 1);
+        if (value.startsWith(' ')) value = value.slice(1);
+        if (field === 'data') data.push(value);
+        else if (field === 'event') event = value;
+      }
+      events.push({ event, data: data.join('\n') });
+    }
+    return events;
+  }
+  const looksLikeSse = (contentType, text) => /event-stream/i.test(contentType) || /^(event|data|id):/m.test(text.slice(0, 200));
+
+  function sseViews(flow, side, transforms, text) {
+    const views = [];
+    const joined = new Map();   // json path -> pieces in event order
+    parseSse(text).forEach((ev, i) => {
+      const parsed = tryJson(ev.data);
+      if (!parsed.ok) {
+        if (ev.data.length >= MIN_STRING) views.push(makeView(flow, side, `events[${i}].data`, [...transforms, 'sse'], ev.data));
+        return;
+      }
+      for (const [path, value] of jsonStrings(parsed.value, '$', [])) {
+        views.push(makeView(flow, side, `events[${i}]${path.slice(1)}`, [...transforms, 'sse', 'json'], value));
+      }
+      // short pieces are exactly what joining is for, so collect them without the length floor
+      (function walk(v, path) {
+        if (typeof v === 'string') { if (!joined.has(path)) joined.set(path, []); joined.get(path).push(v); }
+        else if (Array.isArray(v)) v.forEach((x, k) => walk(x, `${path}[${k}]`));
+        else if (v && typeof v === 'object') for (const k of Object.keys(v)) walk(v[k], path + keyPath(k));
+      })(parsed.value, '$');
+    });
+    for (const [path, pieces] of joined) {
+      if (pieces.length < 2) continue;
+      views.push(makeView(flow, side, `events[*]${path.slice(1)} (joined ${pieces.length})`, [...transforms, 'sse', 'json', 'join'], pieces.join('')));
+    }
+    return views;
+  }
+
   // A view is { flowId, side, locator, transforms, text }. `notes` collects what could not be looked at.
   function makeView(flow, side, locator, transforms, text) {
     return { flowId: flow.id, side, locator, transforms, text };
@@ -126,6 +176,8 @@
     const parsed = tryJson(text);
     if (parsed.ok) {
       for (const [path, value] of jsonStrings(parsed.value, '$', [])) views.push(makeView(flow, side, path, [...transforms, 'json'], value));
+    } else if (looksLikeSse(headerValue(msg.headers, 'content-type'), text)) {
+      views.push(...sseViews(flow, side, transforms, text));
     }
     return views;
   }
@@ -139,5 +191,5 @@
     return { views, notes };
   }
 
-  return { b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, bodyViews, archiveViews };
+  return { b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, bodyViews, archiveViews };
 });

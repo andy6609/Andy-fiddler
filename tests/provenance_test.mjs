@@ -81,6 +81,19 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(views.length === 1 && views[0].locator === 'body', 'invalid JSON keeps only the raw view');
 }
 
+// --- server-sent events ----------------------------------------------------------
+{
+  const pieces = ['int main(', 'int argc) {\n', '  return run();\n', '}\n'];
+  const sse = pieces.map((t, i) => `event: content_block_delta\ndata: ${JSON.stringify({ index: 0, delta: { type: 'text_delta', text: t } })}\n\n`).join('') + 'event: ping\ndata: keepalive\n\n';
+  const { views } = await P.archiveViews({ flows: [flow(30, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] });
+  const joined = views.find((v) => v.locator === 'events[*].delta.text (joined 4)');
+  check(joined && joined.text === pieces.join(''), 'streamed text pieces are joined in event order');
+  check(joined && joined.transforms.join() === 'sse,json,join', 'joining is recorded as a transform');
+  check(views.some((v) => v.locator === 'events[1].delta.text' && v.text === 'int argc) {\n'), 'each event field is also its own view');
+  check(views.some((v) => v.locator === 'events[4].data' && v.text === 'keepalive'), 'non-JSON event data is kept as text');
+  check(views.some((v) => v.locator === 'events[*].delta.type (joined 4)' && v.text === 'text_delta'.repeat(4)), 'every repeated field gets a joined view, not only text');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
