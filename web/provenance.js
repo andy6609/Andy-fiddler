@@ -296,5 +296,49 @@
     return { before: view.text.slice(Math.max(0, at - 60), at), match: view.text.slice(at, at + length), after: view.text.slice(at + length, at + length + 60), hex: false };
   }
 
-  return { search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  // ---------------------------------------------------------------------------
+  // Local files and canaries
+  // ---------------------------------------------------------------------------
+
+  // archive.localFiles entries -> { id, name, bytes, binary, text }. Binary files keep latin1 text for byte search.
+  function prepareFiles(localFiles) {
+    return (localFiles || []).map((f) => {
+      const bytes = b64ToBytes(f.base64);
+      const binary = !isMostlyText(bytes);
+      return { id: f.id, name: f.name, size: bytes.length, bytes, binary, text: binary ? latin1(bytes) : decodeText(bytes) };
+    });
+  }
+
+  // A canary is a random marker planted in an experiment file. Unlike ordinary text it can only have come
+  // from that file, so finding it in a request is unambiguous evidence of where those bytes went.
+  const CANARY = /WSCANARY-[A-Za-z0-9_-]{2,64}/g;
+  const lineAt = (text, offset) => { let n = 1; for (let i = text.indexOf('\n'); i >= 0 && i < offset; i = text.indexOf('\n', i + 1)) n++; return n; };
+
+  function findCanaries(files, views, pattern = CANARY) {
+    const origin = new Map();                 // token -> [{fileId, fileName, line}]
+    for (const f of files) {
+      for (const m of f.text.matchAll(new RegExp(pattern.source, 'g'))) {
+        if (!origin.has(m[0])) origin.set(m[0], []);
+        origin.get(m[0]).push({ fileId: f.id, fileName: f.name, line: f.binary ? null : lineAt(f.text, m.index) });
+      }
+    }
+    const sightings = [];
+    const seen = new Set();
+    for (const v of views) {
+      for (const m of v.text.matchAll(new RegExp(pattern.source, 'g'))) {
+        // a token cut off by the capture limit is still a prefix of the real one; report what was captured
+        const token = m[0];
+        sightings.push({ token, flowId: v.flowId, side: v.side, locator: v.locator, transforms: v.transforms, offset: m.index, from: origin.get(token) || [] });
+        seen.add(token);
+      }
+    }
+    // collapse the same token found in the raw body and in a decoded view of the same body
+    const derived = new Set(sightings.filter((x) => x.locator !== 'body').map((x) => `${x.token}/${x.flowId}/${x.side}`));
+    const unique = sightings.filter((x) => x.locator !== 'body' || !derived.has(`${x.token}/${x.flowId}/${x.side}`));
+    const notSeen = [...origin].filter(([token]) => !seen.has(token)).map(([token, from]) => ({ token, from }));
+    const unknown = [...new Set(unique.filter((x) => !x.from.length).map((x) => x.token))];
+    return { sightings: unique, notSeen, unknown };
+  }
+
+  return { prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });

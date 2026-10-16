@@ -156,6 +156,29 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(capped.hits.length === 5 && capped.truncated, 'hit count is capped per view and the cap is reported');
 }
 
+// --- canaries ----------------------------------------------------------------------
+{
+  const files = P.prepareFiles([
+    { id: 1, name: '.env', base64: b64('# local only\nAPI_KEY=WSCANARY-env-a1\n') },
+    { id: 2, name: 'src/config.ts', base64: b64('export const A = 1;\n// WSCANARY-config-b2\n') },
+    { id: 3, name: 'logo.png', base64: Buffer.concat([Buffer.from([0x89, 0x50, 0, 0, 0, 1]), Buffer.from('WSCANARY-png-c3'), Buffer.alloc(40, 0)]).toString('base64') },
+  ]);
+  check(files[2].binary && !files[0].binary, 'binary files are recognised');
+  const flows = [
+    flow(70, { req: JSON.stringify({ messages: [{ role: 'user', content: 'export const A = 1;\n// WSCANARY-config-b2\n' }] }) }),
+    flow(71, { req: 'telemetry WSCANARY-stray-zz' }),
+    flow(72, { req: JSON.stringify({ image: Buffer.concat([Buffer.from([0x89, 0x50, 0, 0, 0, 1]), Buffer.from('WSCANARY-png-c3'), Buffer.alloc(40, 0)]).toString('base64') }) }),
+  ];
+  const { views } = await P.archiveViews({ flows });
+  const r = P.findCanaries(files, views);
+  const cfg = r.sightings.filter((x) => x.token === 'WSCANARY-config-b2');
+  check(cfg.length === 1 && cfg[0].flowId === 70 && cfg[0].locator === '$.messages[0].content', 'canary found once, in its JSON string, raw duplicate collapsed');
+  check(cfg[0].from[0].fileName === 'src/config.ts' && cfg[0].from[0].line === 2, 'canary is traced back to file and line');
+  check(r.sightings.some((x) => x.token === 'WSCANARY-png-c3' && x.flowId === 72 && x.transforms.includes('base64')), 'canary inside a base64 image is found');
+  check(r.notSeen.length === 1 && r.notSeen[0].token === 'WSCANARY-env-a1', 'files whose canary never appeared are listed');
+  check(r.unknown.length === 1 && r.unknown[0] === 'WSCANARY-stray-zz', 'tokens seen in traffic but in no registered file are listed');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
