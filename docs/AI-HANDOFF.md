@@ -109,7 +109,7 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 | `web/app.js` | 실시간/오프라인 공용 UI(아래 7절) + TRACE 화면(Find in bodies, Local files → requests, 파일 추가/삭제, 일치 inspector) | headless Chrome CDP 조작, JS 오류 0 |
 | `web/provenance.js` | body → view(gzip·JSON·SSE·join·base64·multipart·form), 검색, canary, 줄 run, fragment, 바이너리, 중복 정리, 커버리지. 브라우저·보고서·node 공용 | `tests/provenance_test.mjs` 71개 |
 | `scripts/provenance_cli.mjs` | `.wscope` 를 터미널에서 분석, `--files DIR`, `--json` | 실험 dry run 에서 사용 |
-| `experiments/001-agent-file-egress/` | 실험 절차, `make_sandbox.py`(canary 저장소), `run_agent.py`(에이전트 하나 기록), `fake_agent.py`(정답 아는 가짜) | `tests/experiment_dryrun_test.py` 10개. **실제 에이전트 미실행** |
+| `experiments/001-agent-file-egress/` | 실험 절차, `make_sandbox.py`(canary 저장소), `run_agent.py`(에이전트 하나 기록), `fake_agent.py`(정답 아는 가짜) | `tests/experiment_dryrun_test.py` 14개. **실제 에이전트 미실행** |
 | `src/process.cpp` | accept 직후 `GetExtendedTcpTable` 로 연결 → PID, exe/경로/명령줄/부모 | Windows 러너: 직접 띄운 curl/python 의 PID·경로·명령줄·부모와 일치 |
 | `src/sysproxy.cpp` | WinINET 시스템 프록시 켜기/복원, 백업 파일, 비정상 종료 감지 | Windows 러너: 레지스트리 반영, 프록시 인자 없는 Python urllib 가 따라옴, 4가지 복원 경로 |
 | `tests/core_tests.cpp` | 소켓 없는 단위 테스트 (128개) | 통과 (macOS). Windows 러너는 provenance 머지 후 CI 결과로 확인 |
