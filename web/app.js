@@ -1630,19 +1630,77 @@
       $('#rowCount').textContent = S.trace.hits ? String(S.trace.hits.length) : '';
       return;
     }
-    const a = S.trace.analysis;
-    wrap.innerHTML = a ? `<p class="muted small" style="padding:16px">${a.viewCount} body views from ${S.flows.length} requests.</p>` : '';
+    wrap.innerHTML = provenanceTables();
+    $('#rowCount').textContent = S.trace.analysis ? String(traceMatches().length) : '';
   }
 
-  function traceList() { return S.view === 'find' ? S.trace.hits || [] : []; }
+  const traceMatches = () => (S.trace.analysis?.matches || []).filter((m) => S.trace.fileFilter === null || m.fileId === S.trace.fileFilter);
+  const fileRange = (m) => (m.kind === 'bytes' ? `${m.whole ? 'whole file' : 'first ' + fmtBytes(m.bytes)}` : m.fileFrom === m.fileTo ? `line ${m.fileFrom}` : `lines ${m.fileFrom}–${m.fileTo}`);
+  const rangeText = (c) => (c.binary ? (c.matchedBytes ? `bytes 0–${c.matchedBytes}` : '—') : c.ranges.map(([a, b]) => (a === b ? `${a}` : `${a}–${b}`)).join(', ') || '—');
+
+  function provenanceTables() {
+    const a = S.trace.analysis;
+    if (!a) return '';
+    if (!a.files.length) {
+      return `<div class="empty">${icon('layers')}<strong>No local files registered</strong>
+        <p>Add the files of your experiment repository. Each request and response body is then checked for runs of their lines (or their exact bytes, for binary files) and for planted canary tokens.</p>
+        ${OFFLINE ? '' : '<div class="actions"><button class="primary" data-action="folder-add">Add a folder</button><button data-action="files-add">Add files</button></div>'}</div>`;
+    }
+    const canaries = a.canaries;
+    const perFile = (id) => {
+      const tokens = canaries.sightings.filter((x) => x.from.some((f) => f.fileId === id)).length;
+      const missing = canaries.notSeen.filter((x) => x.from.some((f) => f.fileId === id)).length;
+      return { tokens, missing };
+    };
+    const coverageRows = a.coverage.map((c) => {
+      const reqs = [...new Set(a.matches.filter((m) => m.fileId === c.fileId).map((m) => m.flowId))];
+      const k = perFile(c.fileId);
+      const share = c.binary ? (c.matchedBytes ? `${Math.round(c.ratio * 100)}% of bytes` : 'not seen') : `${c.matchedAnchors} / ${c.anchorLines} lines`;
+      return `<tr class="${S.trace.fileFilter === c.fileId ? 'selected' : ''}" data-action="trace-file" data-id="${c.fileId}">
+        <td class="small" title="${esc(c.fileName)}">${esc(c.fileName)}</td><td class="mono small">${esc(share)}</td>
+        <td class="mono small">${esc(rangeText(c))}</td>
+        <td class="mono small">${k.tokens ? `${k.tokens} seen` : ''}${k.missing ? `${k.tokens ? ', ' : ''}${k.missing} not seen` : ''}${!k.tokens && !k.missing ? '—' : ''}</td>
+        <td class="mono small">${reqs.length ? reqs.map((id) => `#${id}`).join(' ') : '—'}</td></tr>`;
+    }).join('');
+    const matches = traceMatches();
+    const matchRows = matches.map((m, i) => `<tr data-action="trace-match" data-i="${i}" class="${S.selected?.kind === 'match' && S.selected.id === i ? 'selected' : ''}">
+      <td class="small" title="${esc(m.fileName)}">${esc(m.fileName)}</td><td class="mono small">${esc(fileRange(m))}</td>
+      <td class="id">#${m.flowId}</td><td class="small">${sideLabel(m.side)}</td>
+      <td class="mono small" title="${esc(m.locator)}">${esc(m.locator)}</td><td class="small">${transformBadges(m.transforms)}</td></tr>`).join('');
+    const canaryRows = [
+      ...canaries.sightings.map((x, i) => `<tr data-action="trace-canary" data-i="${i}" class="${S.selected?.kind === 'canary' && S.selected.id === i ? 'selected' : ''}">
+        <td class="mono small">${esc(x.token)}</td><td class="small">${x.from.length ? x.from.map((f) => esc(`${f.fileName}${f.line ? `:${f.line}` : ''}`)).join(', ') : '<span class="badge warn">not in any local file</span>'}</td>
+        <td class="mono small">#${x.flowId} ${sideLabel(x.side)}</td><td class="mono small" title="${esc(x.locator)}">${esc(x.locator)}</td></tr>`),
+      ...canaries.notSeen.map((x) => `<tr><td class="mono small">${esc(x.token)}</td><td class="small">${x.from.map((f) => esc(`${f.fileName}${f.line ? `:${f.line}` : ''}`)).join(', ')}</td>
+        <td class="small muted" colspan="2">not seen in any captured body</td></tr>`),
+    ].join('');
+    return `
+      <div class="trace-section"><div class="section-title"><span>Coverage per file</span><span class="muted">meaningful lines (not blank, not just brackets) that appeared in a run</span></div>
+        <table class="traffic"><colgroup><col style="width:30%"><col style="width:120px"><col><col style="width:110px"><col style="width:120px"></colgroup>
+        <thead><tr><th>File</th><th>Seen</th><th>Ranges</th><th>Canaries</th><th>Requests</th></tr></thead><tbody>${coverageRows}</tbody></table></div>
+      <div class="trace-section"><div class="section-title"><span>Matches${S.trace.fileFilter !== null ? ' for the selected file' : ''}</span><span class="muted">${matches.length}</span></div>
+        ${matches.length ? `<table class="traffic"><colgroup><col style="width:22%"><col style="width:96px"><col style="width:58px"><col style="width:88px"><col><col style="width:150px"></colgroup>
+        <thead><tr><th>File</th><th>Part</th><th>Request</th><th>Side</th><th>Where</th><th>How</th></tr></thead><tbody>${matchRows}</tbody></table>`
+          : '<p class="muted small" style="padding:0 12px">No run of lines or bytes from these files was found in any captured body.</p>'}</div>
+      ${canaryRows ? `<div class="trace-section"><div class="section-title"><span>Canary tokens</span><span class="muted">WSCANARY-… markers planted in files</span></div>
+        <table class="traffic"><colgroup><col style="width:190px"><col style="width:26%"><col style="width:150px"><col></colgroup>
+        <thead><tr><th>Token</th><th>From</th><th>Seen in</th><th>Where</th></tr></thead><tbody>${canaryRows}</tbody></table></div>` : ''}
+      ${limitsNotice()}`;
+  }
+
+  function traceList(kind = S.view === 'find' ? 'hit' : 'match') {
+    if (kind === 'hit') return S.trace.hits || [];
+    if (kind === 'canary') return S.trace.analysis?.canaries.sightings || [];
+    return traceMatches();
+  }
 
   function selectTrace(kind, i) {
-    const item = traceList()[i];
+    const item = traceList(kind)[i];
     if (!item) return;
     S.selected = { kind, id: i };
     S.detail = item;
     for (const tr of $$('#tableWrap tr.selected')) tr.classList.remove('selected');
-    const row = $(`#tableWrap tr[data-i="${i}"]`);
+    const row = $(`#tableWrap tr[data-action="trace-${kind}"][data-i="${i}"]`);
     if (row) { row.classList.add('selected'); row.scrollIntoView({ block: 'nearest' }); }
     renderInspector();
   }
@@ -1841,6 +1899,8 @@
     },
     'trace-case': (el) => { S.trace.caseSensitive = el.checked; runSearch(); renderTraceTable(); renderSidebar(); },
     'trace-hit': (el) => selectTrace('hit', Number(el.dataset.i)),
+    'trace-match': (el) => selectTrace('match', Number(el.dataset.i)),
+    'trace-canary': (el) => selectTrace('canary', Number(el.dataset.i)),
     'trace-open-flow': (el) => {
       S.flowTab = el.dataset.side === 'response' ? 'response' : 'request';
       S.view = 'flows'; S.category = 'all'; S.connection = '';
