@@ -2,7 +2,7 @@
 
 **Follow one HTTP request all the way down to the bytes on the wire.**
 
-WireScope is a traffic inspector I'm building in C++20. You pick a request the proxy recorded, and from there you can keep going down: the TCP connection it used, the IP packets that made up that connection, and the exact byte offset of every header field.
+WireScope is a traffic inspector I'm building in C++17. You pick a request the proxy recorded, and from there you can keep going down: the TCP connection it used, the IP packets that made up that connection, and the exact byte offset of every header field.
 
 ![Request inspector](docs/images/inspector-request.png)
 
@@ -84,6 +84,7 @@ The full breakdown is in [docs/COVERAGE.md](docs/COVERAGE.md) (in Korean for now
 - **Notes and comparisons**: structural JSON diff, plus session metadata (which client, what you did) and per-request notes, so experiments stay reproducible.
 - **Export** to a `.wscope` session, `.pcapng`, or a single-file HTML report. The report carries the viewer with it, so it works offline, and it has an optional pattern-based redaction mode.
 - **The local API isn't left wide open**: per-run token, Host check (DNS rebinding), Origin check (cross-site requests), CSP.
+- **Windows only** (`windows` branch): each request shows which process opened the proxy connection (PID, exe, command line, parent), read from the Windows TCP table the moment the connection is accepted. An opt-in **Use as system proxy** switch points WinINET at the proxy and puts your old setting back afterwards. Details in [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ### Rules I try to stick to
 
@@ -93,7 +94,13 @@ The full breakdown is in [docs/COVERAGE.md](docs/COVERAGE.md) (in Korean for now
 
 ## Build and run
 
-You need CMake ≥ 3.20, a C++20 compiler, OpenSSL 3 and nghttp2. Live capture on Windows needs [Npcap](https://npcap.com/) installed with loopback support.
+You need CMake ≥ 3.20, a C++17 compiler, OpenSSL 3 and nghttp2. Live capture on Windows needs [Npcap](https://npcap.com/) installed with loopback support.
+
+```powershell
+# Windows: Visual Studio 2022+ with "Desktop development with C++" (brings MSVC, CMake and vcpkg)
+.\scripts\build-windows.ps1 -Test all      # vcpkg builds OpenSSL + nghttp2 once, then build and run the tests
+.\build-windows\Release\WireScope.exe
+```
 
 ```sh
 # macOS with Homebrew
@@ -105,18 +112,18 @@ ctest --test-dir build --output-on-failure   # unit + end-to-end + lab
 
 Options: `--port N` (UI port), `--data DIR` (where the CA lives; `%LOCALAPPDATA%\WireScope` on Windows), `--web DIR`, `--no-open`, `--sample`.
 
-To point a client at the proxy (proxy env vars, `NODE_EXTRA_CA_CERTS`, curl `--cacert`), open **Certificate → Client setup** in the UI. WireScope never touches your system proxy settings.
+To point a client at the proxy (proxy env vars, `NODE_EXTRA_CA_CERTS`, curl `--cacert`), open **Certificate → Client setup** in the UI. WireScope only changes the Windows system proxy when you press **Use as system proxy**: it saves the old setting first and restores it when you turn it off, stop the proxy or quit. CLI tools such as curl and Node.js-based agents ignore that setting anyway, so they need the environment variables.
 
 ## Where it stands
 
-Windows is the real target, and it still hasn't been compiled there. Everything below was checked on my Mac.
+Windows is the real target. On the `windows` branch it builds with MSVC and the whole test suite runs on a GitHub Actions Windows runner. Nobody has run it on a Windows desktop yet.
 
 | | |
 |---|---|
-| Build, unit tests (94 assertions), end-to-end tests (46 assertions against local HTTP, HTTPS and HTTP/2 servers) | passing, 2026-10-15 |
-| lab v1–v8 smoke tests (86 assertions) | passing. v6 live capture only checked on its error path, since this Mac has no BPF permission |
-| UI driven in headless Chrome: list, detail, SSE, gzip, compare, packet hex, offline report | no JS errors |
-| Windows build, Npcap live capture, Windows certificate store | **not verified yet** |
+| macOS dev host: build, unit tests (104 assertions), end-to-end tests (48 assertions against local HTTP, HTTPS and HTTP/2 servers), lab v1–v10 smoke tests (88) | passing, 2026-10-16 |
+| Windows runner (Server 2025, MSVC `/W4` with 0 warnings): the same unit, end-to-end and lab tests, plus 35 Windows-only checks (process attribution against real PIDs, system proxy on/off/crash recovery, Korean `--data` path) | passing, 2026-10-16 — see [docs/WINDOWS.md](docs/WINDOWS.md) |
+| UI driven in headless Chrome: list, detail, SSE, gzip, compare, packet hex, offline report, process column | no JS errors |
+| Npcap live capture, Windows certificate store install, a real Windows 10/11 desktop | **not verified yet** |
 | Real AI services and coding agents | **not done yet**. That's the next experiment |
 
 ## lab/
@@ -128,6 +135,7 @@ Before (and next to) the main tool, I broke each idea out into its own small pro
 | v1 what to record, and body limits | v4 packets → fields and offsets | v7 engine ↔ browser, and what to lock down |
 | v2 TLS pass-through vs. termination | v5 packets → TCP byte stream, gaps | v8 structural diff, standalone HTML |
 | v3 HTTP/2 frames and HPACK | v6 libpcap/Npcap and BPF | |
+| **Windows only:** v9 connection → owning process | v10 the three places Windows keeps a proxy setting | |
 
 The roadmap, and which part of `src/` each one maps to, is in [docs/lab/README.md](docs/lab/README.md).
 
@@ -152,4 +160,4 @@ If you want to read the code, this order works:
 6. `web/app.js`: the inspector UI, shared by live mode and offline reports
 7. `tests/`: `core_tests.cpp`, `integration_test.py`, `lab_smoke.py`
 
-Built with C++20, OpenSSL, nghttp2, libpcap/Npcap, cpp-httplib, nlohmann/json, plain JavaScript (no framework), and CMake/CTest.
+Built with C++17, OpenSSL, nghttp2, libpcap/Npcap, cpp-httplib, nlohmann/json, plain JavaScript (no framework), and CMake/CTest.

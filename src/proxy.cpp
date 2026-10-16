@@ -1,4 +1,5 @@
 #include "net.hpp"
+#include "process.hpp"
 #include <algorithm>
 #include <charconv>
 #include <thread>
@@ -27,14 +28,16 @@ std::string tlsError(){unsigned long e=ERR_get_error();char b[256]{};ERR_error_s
 }
 struct Proxy::Impl {
     Store& store;Tls& tls;std::atomic<bool> running{false};sock_t listener=bad_socket;std::thread accepter;
-    mutable std::mutex mutex;std::map<sock_t,sock_t> sockets;std::string error;uint16_t port=18080;bool mitm=true;
+    mutable std::mutex mutex;std::map<sock_t,sock_t> sockets;std::string error;uint16_t listenPort=18080;bool mitm=true;
     struct Worker{std::thread thread;std::shared_ptr<std::atomic<bool>> done;};std::vector<Worker> workers;
     Impl(Store& s,Tls& t):store(s),tls(t){}
     void connect(Channel& up,sock_t client,const std::string& host,uint16_t port){
         {std::lock_guard lock(mutex);sockets[client]=bad_socket;up.reset();}
         addrinfo hints{},*result=nullptr;hints.ai_family=AF_UNSPEC;hints.ai_socktype=SOCK_STREAM;
         if(getaddrinfo(host.c_str(),std::to_string(port).c_str(),&hints,&result)!=0)throw std::runtime_error("DNS lookup failed: "+host);
-        for(auto* a=result;a&&running;a=a->ai_next){sock_t s=socket(a->ai_family,a->ai_socktype,a->ai_protocol);if(s==bad_socket)continue;{std::lock_guard lock(mutex);sockets[client]=s;}nonblocking(s,true);int resultCode=::connect(s,a->ai_addr,int(a->ai_addrlen));bool ok=resultCode==0;auto end=nowMs()+10000;while(!ok&&running&&nowMs()<end){fd_set w;FD_ZERO(&w);FD_SET(s,&w);timeval tv{0,100000};if(select(int(s)+1,nullptr,&w,nullptr,&tv)>0){int e=0;
+        for(auto* a=result;a&&running;a=a->ai_next){sock_t s=socket(a->ai_family,a->ai_socktype,a->ai_protocol);if(s==bad_socket)continue;{std::lock_guard lock(mutex);sockets[client]=s;}nonblocking(s,true);int resultCode=::connect(s,a->ai_addr,int(a->ai_addrlen));bool ok=resultCode==0;auto end=nowMs()+10000;while(!ok&&running&&nowMs()<end){
+            // Windows reports a failed non-blocking connect only in exceptfds (POSIX: writefds), so watch both.
+            fd_set w,x;FD_ZERO(&w);FD_ZERO(&x);FD_SET(s,&w);FD_SET(s,&x);timeval tv{0,100000};if(select(int(s)+1,nullptr,&w,&x,&tv)>0){int e=0;
 #ifdef _WIN32
 int n=sizeof(e);
 #else
@@ -47,14 +50,16 @@ getsockopt(s,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&e),&n);ok=e==0;break;}
     json keys(Channel& c,Channel& u){return json::array({connectionKey(socketAddress(c.socket,true),socketAddress(c.socket,false)),connectionKey(socketAddress(u.socket,true),socketAddress(u.socket,false))});}
     void tunnel(Channel& c,Channel& u,uint64_t id){
         auto pending=[&](Channel& a,Channel& b,bool request){if(a.buffer.empty())return;auto data=std::move(a.buffer);a.buffer.clear();b.write(data);store.edit(id,[&](Flow& f){(request?f.request:f.response).append(data.data(),data.size());});};pending(c,u,true);pending(u,c,false);
-        while(running){fd_set r;FD_ZERO(&r);FD_SET(c.socket,&r);FD_SET(u.socket,&r);timeval tv{0,100000};int n=select(int(std::max(c.socket,u.socket))+1,&r,nullptr,nullptr,&tv);if(n<0)break;for(auto [from,to,request]:{std::tuple<Channel*,Channel*,bool>{&c,&u,true},{&u,&c,false}}){if(!FD_ISSET(from->socket,&r)&&!(from->ssl&&SSL_pending(from->ssl)))continue;char b[16384];int size=from->read(b,sizeof(b));if(!size)return;to->write(b,size_t(size));store.edit(id,[&](Flow& f){(request?f.request:f.response).append(b,size_t(size));});}}
+        while(running){fd_set r;FD_ZERO(&r);FD_SET(c.socket,&r);FD_SET(u.socket,&r);timeval tv{0,100000};int n=select(int(std::max(c.socket,u.socket))+1,&r,nullptr,nullptr,&tv);if(n<0)break;for(auto [from,to,request]:{std::tuple<Channel*,Channel*,bool>{&c,&u,true},{&u,&c,false}}){if(!FD_ISSET(from->socket,&r)&&!(from->ssl&&SSL_pending(from->ssl)))continue;char b[16384];int size=from->read(b,sizeof(b));if(!size)return;to->write(b,size_t(size));const bool upward=request;/* C++17: lambdas cannot capture structured bindings */store.edit(id,[&](Flow& f){(upward?f.request:f.response).append(b,size_t(size));});}}
     }
     void serve(sock_t socket){Channel client,up;client.socket=socket;socketTimeout(socket,60);uint64_t active=0;std::string conn="tcp-"+randomHex(8);int64_t started=nowMs();
         struct Cleanup{Impl* p;sock_t s;~Cleanup(){std::lock_guard lock(p->mutex);p->sockets.erase(s);}} cleanup{this,socket};
+        // Who opened this connection: looked up before the first read, while the app's socket is surely still in the TCP table (Windows only; null elsewhere).
+        const json process=processForConnection(socketAddress(socket,true),socketAddress(socket,false));auto attributed=[&](json meta){if(!process.is_null())meta["process"]=process;return meta;};
         try{Head head;if(!readHead(client,head))return;std::string tunnelHost;uint16_t tunnelPort=443;bool secure=false;
-            if(head.line.starts_with("CONNECT ")){
+            if(startsWith(head.line,"CONNECT ")){
                 auto space=head.line.find(' ',8);if(space==std::string::npos)throw std::runtime_error("Invalid CONNECT");auto [host,port]=authority(head.line.substr(8,space-8),443);tunnelHost=host;tunnelPort=port;
-                active=store.createFlow({{"method","CONNECT"},{"host",host},{"port",port},{"path",endpoint(host,port)},{"protocol","Tunnel"},{"connection",conn}},head.headers);
+                active=store.createFlow(attributed({{"method","CONNECT"},{"host",host},{"port",port},{"path",endpoint(host,port)},{"protocol","Tunnel"},{"connection",conn}}),head.headers);
                 connect(up,socket,host,port);store.edit(active,[&](Flow& f){f.meta["packetKeys"]=keys(client,up);});client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
                 if(!mitm){store.edit(active,[](Flow& f){f.meta["status"]=200;f.meta["state"]="streaming";f.meta["encrypted"]=true;});tunnel(client,up,active);store.edit(active,[&](Flow& f){f.meta["state"]="complete";f.meta["duration"]=nowMs()-started;});return;}
                 if(!client.buffer.empty())throw std::runtime_error("Pipelined TLS handshake is not supported");
@@ -63,14 +68,19 @@ getsockopt(s,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&e),&n);ok=e==0;break;}
                 up.ssl=SSL_new(tls.client);SSL_set_fd(up.ssl,int(up.socket));SSL_set_tlsext_host_name(up.ssl,host.c_str());unsigned char ip[16];bool numeric=inet_pton(AF_INET,host.c_str(),ip)==1||inet_pton(AF_INET6,host.c_str(),ip)==1;
                 if(numeric)X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(up.ssl),host.c_str());else SSL_set1_host(up.ssl,host.c_str());
                 static const unsigned char h2alpn[]={2,'h','2'}, h1alpn[]={8,'h','t','t','p','/','1','.','1'};SSL_set_alpn_protos(up.ssl,h2?h2alpn:h1alpn,h2?sizeof(h2alpn):sizeof(h1alpn));if(SSL_connect(up.ssl)!=1)throw std::runtime_error("Upstream TLS verification: "+tlsError());const unsigned char* selected=nullptr;unsigned selectedLen=0;SSL_get0_alpn_selected(up.ssl,&selected,&selectedLen);if(h2&&(selectedLen!=2||std::string(reinterpret_cast<const char*>(selected),2)!="h2"))throw std::runtime_error("Upstream did not negotiate h2; no HTTP/2-to-HTTP/1 translation");
-                store.edit(active,[&](Flow& f){f.meta["status"]=200;f.meta["state"]="complete";f.meta["duration"]=nowMs()-started;f.meta["tls"]=SSL_get_version(client.ssl);f.meta["cipher"]=SSL_get_cipher(client.ssl);f.meta["alpn"]=h2?"h2":"http/1.1";f.timeline.push_back({{"time",nowMs()},{"event","tls.established"}});});active=0;
-                if(h2){http2(store,client,up,tunnelHost,tunnelPort,conn,keys(client,up),running);return;}secure=true;if(!readHead(client,head))return;
+                store.edit(active,[&](Flow& f){f.meta["status"]=200;f.meta["state"]="complete";f.meta["duration"]=nowMs()-started;f.meta["tls"]=SSL_get_version(client.ssl);f.meta["cipher"]=SSL_get_cipher(client.ssl);f.meta["alpn"]=h2?"h2":"http/1.1";f.timeline.push_back({{"time",nowMs()},{"event","tls.established"}});});const uint64_t tunnelFlow=active;active=0;
+                // Some clients reject our certificate (untrusted CA, pinning) only after SSL_accept returned here: with a TLS alert,
+                // a TCP reset, or a plain close (curl/LibreSSL on the Windows runner sent no alert). Record what happened on the CONNECT flow.
+                // A plain close is a fact field, not an error: browsers also close preconnected tunnels unused.
+                auto beforeFirstRequest=[&](const std::string& error){store.edit(tunnelFlow,[&](Flow& f){if(!error.empty()){f.meta["state"]="error";f.meta["error"]=error;}else f.meta["clientClosed"]="before the first request, without a TLS alert";f.timeline.push_back({{"time",nowMs()},{"event",error.empty()?"client.closed.before.request":"client.tls.error"}});});};
+                if(h2){auto end=http2(store,client,up,tunnelHost,tunnelPort,conn,keys(client,up),process,running);if(end.noStreams)beforeFirstRequest(end.clientError.empty()?"":"before the first request: "+end.clientError);return;}secure=true;
+                try{if(!readHead(client,head)){beforeFirstRequest("");return;}}catch(const std::exception& e){beforeFirstRequest(std::string("client ended TLS before the first request: ")+e.what());return;}
             }
             std::string connectedHost=secure?tunnelHost:"";uint16_t connectedPort=secure?tunnelPort:0;
             do{if(!running)break;started=nowMs();auto s1=head.line.find(' '),s2=head.line.find(' ',s1==std::string::npos?0:s1+1);if(s1==std::string::npos||s2==std::string::npos)throw std::runtime_error("Invalid request line");std::string method=head.line.substr(0,s1),path=head.line.substr(s1+1,s2-s1-1);if(head.line.substr(s2+1)!="HTTP/1.1"&&head.line.substr(s2+1)!="HTTP/1.0")throw std::runtime_error("Unsupported HTTP version");auto [host,port]=authority(header(head.headers,"host"),secure?443:80);
-                if(path.starts_with("http://")){if(secure)throw std::runtime_error("Absolute HTTP target inside TLS tunnel");auto end=path.find_first_of("/?",7);auto hp=authority(path.substr(7,end==std::string::npos?end:end-7),80);host=hp.first;port=hp.second;path=end==std::string::npos?"/":path.substr(end);if(path.front()=='?')path="/"+path;eraseHeader(head.headers,"host");head.headers.emplace_back("Host",endpoint(host,port));}
+                if(startsWith(path,"http://")){if(secure)throw std::runtime_error("Absolute HTTP target inside TLS tunnel");auto end=path.find_first_of("/?",7);auto hp=authority(path.substr(7,end==std::string::npos?end:end-7),80);host=hp.first;port=hp.second;path=end==std::string::npos?"/":path.substr(end);if(path.front()=='?')path="/"+path;eraseHeader(head.headers,"host");head.headers.emplace_back("Host",endpoint(host,port));}
                 if(path.empty()||(path[0]!='/'&&path!="*"))throw std::runtime_error("Invalid request target");if(secure&&(lower(host)!=lower(tunnelHost)||port!=tunnelPort))throw std::runtime_error("Host differs from CONNECT authority");
-                active=store.createFlow({{"method",method},{"host",host},{"port",port},{"path",path},{"protocol",head.line.substr(s2+1)},{"connection",conn},{"tls",secure?SSL_get_version(client.ssl):""}},head.headers);
+                active=store.createFlow(attributed({{"method",method},{"host",host},{"port",port},{"path",path},{"protocol",head.line.substr(s2+1)},{"connection",conn},{"tls",secure?SSL_get_version(client.ssl):""}}),head.headers);
                 if(host!=connectedHost||port!=connectedPort||up.socket==bad_socket){connect(up,socket,host,port);connectedHost=host;connectedPort=port;}
                 store.edit(active,[&](Flow& f){f.meta["packetKeys"]=keys(client,up);});auto requestFrame=framing(head.headers,false,false);
                 if(lower(header(head.headers,"expect"))=="100-continue"){client.write("HTTP/1.1 100 Continue\r\n\r\n");eraseHeader(head.headers,"expect");}
@@ -79,9 +89,9 @@ getsockopt(s,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&e),&n);ok=e==0;break;}
                 auto rf=framing(response.headers,true,method=="HEAD"||status==204||status==304||status==101);store.edit(active,[&](Flow& f){f.responseHeaders=response.headers;f.meta["status"]=status;f.meta["state"]="streaming";f.timeline.push_back({{"time",nowMs()},{"event","response.headers"}});});client.write(serialize(response));
                 if(status==101){store.edit(active,[](Flow& f){f.meta["protocol"]="WebSocket";});tunnel(client,up,active);}else relayBody(up,client,rf,store,active,false,running);
                 store.edit(active,[&](Flow& f){f.meta["duration"]=nowMs()-started;f.meta["state"]=running?"complete":"interrupted";f.timeline.push_back({{"time",nowMs()},{"event","response.end"}});});active=0;
-                if(status==101||rf.mode==Framing::Close||lower(header(head.headers,"connection"))=="close"||lower(header(response.headers,"connection"))=="close"||head.line.ends_with("HTTP/1.0"))break;
+                if(status==101||rf.mode==Framing::Close||lower(header(head.headers,"connection"))=="close"||lower(header(response.headers,"connection"))=="close"||endsWith(head.line,"HTTP/1.0"))break;
             }while(readHead(client,head));
-        }catch(const std::exception& e){if(!active)active=store.createFlow({{"method","—"},{"host",socketAddress(socket,true)},{"path",""},{"protocol","Connection"},{"connection",conn}});store.edit(active,[&](Flow& f){f.meta["state"]="error";f.meta["error"]=e.what();f.meta["duration"]=nowMs()-started;f.timeline.push_back({{"time",nowMs()},{"event","connection.error"}});});}
+        }catch(const std::exception& e){if(!active)active=store.createFlow(attributed({{"method","—"},{"host",socketAddress(socket,true)},{"path",""},{"protocol","Connection"},{"connection",conn}}));store.edit(active,[&](Flow& f){f.meta["state"]="error";f.meta["error"]=e.what();f.meta["duration"]=nowMs()-started;f.timeline.push_back({{"time",nowMs()},{"event","connection.error"}});});}
     }
 };
 Proxy::Proxy(Store& s,Tls& t):impl_(std::make_unique<Impl>(s,t)){}
@@ -92,12 +102,12 @@ setsockopt(listener,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,reinterpret_cast<const char*>
 #else
 setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
 #endif
-sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);addr.sin_port=htons(port);if(bind(listener,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))!=0||listen(listener,64)!=0){closeSocket(listener);throw std::runtime_error("Proxy port is unavailable");}i.listener=listener;i.port=port;i.mitm=mitm;i.running=true;{std::lock_guard lock(i.mutex);i.error.clear();}
+sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);addr.sin_port=htons(port);if(bind(listener,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))!=0||listen(listener,64)!=0){closeSocket(listener);throw std::runtime_error("Proxy port is unavailable");}i.listener=listener;i.listenPort=port;i.mitm=mitm;i.running=true;{std::lock_guard lock(i.mutex);i.error.clear();}
     i.accepter=std::thread([&i]{while(i.running){fd_set r;FD_ZERO(&r);FD_SET(i.listener,&r);timeval tv{0,100000};if(select(int(i.listener)+1,&r,nullptr,nullptr,&tv)<=0)continue;auto s=accept(i.listener,nullptr,nullptr);if(s==bad_socket)continue;{std::lock_guard lock(i.mutex);if(i.sockets.size()>=64||!i.running){closeSocket(s);continue;}i.sockets[s]=bad_socket;}
         for(auto it=i.workers.begin();it!=i.workers.end();){if(it->done->load()){it->thread.join();it=i.workers.erase(it);}else ++it;}
         auto done=std::make_shared<std::atomic<bool>>(false);i.workers.push_back({std::thread([&i,s,done]{try{i.serve(s);}catch(...){std::lock_guard lock(i.mutex);i.error="Unhandled connection error";i.sockets.erase(s);}*done=true;}),done});}
     });
 }
 void Proxy::stop(){auto& i=*impl_;i.running=false;if(i.accepter.joinable())i.accepter.join();closeSocket(i.listener);i.listener=bad_socket;{std::lock_guard lock(i.mutex);for(auto& [c,u]:i.sockets){shutdownSocket(c);shutdownSocket(u);}}for(auto& w:i.workers)if(w.thread.joinable())w.thread.join();i.workers.clear();}
-json Proxy::status()const{auto& i=*impl_;std::lock_guard lock(i.mutex);return {{"running",i.running.load()},{"port",i.port},{"mitm",i.mitm},{"connections",i.sockets.size()},{"error",i.error}};}
+json Proxy::status()const{auto& i=*impl_;std::lock_guard lock(i.mutex);return {{"running",i.running.load()},{"port",i.listenPort},{"mitm",i.mitm},{"connections",i.sockets.size()},{"error",i.error}};}
 }

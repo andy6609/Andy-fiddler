@@ -108,7 +108,11 @@ static int listInterfaces() {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    setvbuf(stdout, nullptr, _IONBF, 0);   // MSVC: _IOLBF 없음 + 크기 0 이면 즉시 종료 (lab_net.hpp 의 lineBufferedStdout 참고)
+#else
     setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
     std::string device, readFile, writeFile, filter;
     uint64_t limit = 0;
     bool dumpFilter = false;

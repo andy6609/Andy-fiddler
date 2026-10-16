@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """End-to-end test: real clients -> WireScope proxy -> local test servers.
 
-Runs on a development host (macOS/Linux) with curl (HTTP/2 enabled), openssl and nghttpd.
+Runs with curl (HTTP/2 enabled) and openssl. The HTTP/2 upstream is nghttpd when installed, otherwise
+tests/h2_server.py on the Python 'h2' package (the Windows path; force it with WIRESCOPE_H2_SERVER=python).
+CURL / OPENSSL / NGHTTPD environment variables override the tools found on PATH.
 It does not cover Npcap or Windows trust-store behaviour.
 
     python3 tests/integration_test.py [path/to/build]
@@ -25,10 +27,20 @@ import threading
 import time
 import urllib.request
 
+# Windows pipes default to the ANSI code page (cp1252 on the runner); lab programs print Korean.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build"))
 NGHTTPD = os.environ.get("NGHTTPD") or shutil.which("nghttpd") or "/opt/homebrew/opt/nghttp2/bin/nghttpd"
-OPENSSL = shutil.which("openssl")
+if os.environ.get("WIRESCOPE_H2_SERVER") == "python" or not os.path.exists(NGHTTPD):
+    H2D = [sys.executable, os.path.join(ROOT, "tests", "h2_server.py")]  # same arguments as nghttpd
+else:
+    H2D = [NGHTTPD]
+OPENSSL = os.environ.get("OPENSSL") or shutil.which("openssl")
+CURL = os.environ.get("CURL") or shutil.which("curl") or "curl"
+EXE = ".exe" if os.name == "nt" else ""
 
 failures = []
 
@@ -43,6 +55,17 @@ def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def wait_port(port, timeout=10):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            return True
+        except OSError:
+            time.sleep(0.05)
+    return False
 
 
 BIG = bytes(range(256)) * 6144  # 1.5 MiB, larger than the 1 MiB capture limit
@@ -66,9 +89,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/hello":
+        path = self.path.split("?", 1)[0]  # route on the path; tests tag requests with ?who=...
+        if path == "/hello":
             self.send(200, b"hello world", "text/plain")
-        elif self.path == "/chunked":
+        elif path == "/chunked":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Transfer-Encoding", "chunked")
@@ -77,11 +101,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for part in (b"part1-", b"part2"):
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
             self.wfile.write(b"0\r\nX-Checksum: abc123\r\n\r\n")
-        elif self.path == "/gzip":
+        elif path == "/gzip":
             self.send(200, GZ_JSON, "application/json", [("Content-Encoding", "gzip")])
-        elif self.path == "/big":
+        elif path == "/big":
             self.send(200, BIG, "application/octet-stream")
-        elif self.path == "/sse":
+        elif path == "/sse":
             self.send(200, SSE, "text/event-stream")
         else:
             self.send(404, b"not found", "text/plain")
@@ -111,7 +135,7 @@ class Engine:
     def __init__(self, tmp):
         self.port = free_port()
         env = dict(os.environ, SSL_CERT_FILE=f"{tmp}/up-ca.pem")  # upstream verification trusts the test CA
-        self.proc = subprocess.Popen([f"{BUILD}/WireScope", "--no-open", "--port", str(self.port), "--data", f"{tmp}/data",
+        self.proc = subprocess.Popen([f"{BUILD}/WireScope{EXE}", "--no-open", "--port", str(self.port), "--data", f"{tmp}/data",
                                       "--web", f"{BUILD}/web"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.base = f"http://127.0.0.1:{self.port}"
         for _ in range(100):
@@ -144,7 +168,7 @@ class Engine:
 
 
 def curl(*args, proxy):
-    r = subprocess.run(["curl", "-sS", "--max-time", "20", "-x", f"http://127.0.0.1:{proxy}", *args], capture_output=True)
+    r = subprocess.run([CURL, "-sS", "--max-time", "20", "-x", f"http://127.0.0.1:{proxy}", *args], capture_output=True)
     return r.returncode, r.stdout, r.stderr.decode()
 
 
@@ -198,8 +222,10 @@ def main():
             with open(f"{tmp}/htdocs/f{i}.json", "w") as f:
                 json.dump({"file": i, "pad": "x" * (2000 * i)}, f)
         h2port = free_port()
-        procs.append(subprocess.Popen([NGHTTPD, f"--address=127.0.0.1", f"--htdocs={tmp}/htdocs", "--trailer=x-h2-trailer: yes",
+        procs.append(subprocess.Popen([*H2D, f"--address=127.0.0.1", f"--htdocs={tmp}/htdocs", "--trailer=x-h2-trailer: yes",
                                        str(h2port), f"{tmp}/server.key", f"{tmp}/server.pem"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        if not wait_port(h2port):
+            raise RuntimeError(f"HTTP/2 test server did not start: {' '.join(H2D)}")
         engine = Engine(tmp)
         procs.append(engine.proc)
         H1, HS = h1.server_address[1], hs.server_address[1]
@@ -274,13 +300,28 @@ def main():
         check(len(tunnels) >= 2 and all(t.get("alpn") in ("h2", "http/1.1") for t in tunnels), "CONNECT flows record negotiated ALPN")
         check(all(len(f.get("packetKeys", [])) == 2 for f in hello), "client and upstream endpoint keys recorded")
 
+        print("Client that does not trust the local CA")
+        before = len(engine.flows())
+        rc, _, _ = curl("--http1.1", f"https://localhost:{HS}/hello", proxy=proxy)  # no --cacert: the forged leaf must be rejected
+        rc2, _, _ = curl("--http2", f"https://localhost:{h2port}/f1.json", proxy=proxy)
+        rejected = [f for f in wait_settled(engine, before + 2)[before:] if f["method"] == "CONNECT"]
+        print(f"  info recorded: {[(f['path'], f['state'], f.get('error', '')) for f in rejected]}")
+        # Clients differ: an alert during SSL_accept (macOS curl), or a reset / plain close right after it with no alert
+        # (curl + LibreSSL on the Windows runner). Whatever happened must be on the CONNECT flow, not look like a quiet tunnel.
+        recorded = lambda f: (f["state"] == "error" and any(k in f.get("error", "") for k in ("Client TLS", "TLS read failed"))) or bool(f.get("clientClosed"))
+        check(rc != 0 and rc2 != 0, "both clients refuse the forged certificate")
+        check(len(rejected) == 2 and all(recorded(f) for f in rejected),
+              "how each client ended the tunnel is recorded on its CONNECT flow (HTTP/1.1 and h2 ALPN)")
+
         print("Passthrough and errors")
         engine.request("POST", "/api/proxy/stop", {})
         engine.request("POST", "/api/proxy/start", {"port": proxy, "mitm": False})
         before = len(engine.flows())
         rc, out, _ = curl("--http1.1", "--cacert", f"{tmp}/up-ca.pem", f"https://localhost:{HS}/hello", proxy=proxy)
         check(rc == 0 and out == b"hello world", "TLS passthrough works with the server's own certificate")
+        started = time.time()
         rc, _, _ = curl(f"http://127.0.0.1:{free_port()}/nothing", proxy=proxy)
+        refused_seconds = time.time() - started
         flows = wait_settled(engine, before + 2)
         tunnel = [f for f in flows[before:] if f["method"] == "CONNECT"]
         check(tunnel and tunnel[0].get("encrypted") and tunnel[0]["requestBytes"] > 0 and tunnel[0]["responseBytes"] > 0, "passthrough tunnel records encrypted byte counts")
@@ -289,6 +330,9 @@ def main():
             check(raw[:1] == b"\x16", "tunnel bytes start with a TLS handshake record")
         errs = [f for f in flows[before:] if f["state"] == "error"]
         check(errs and "Upstream connection failed" in errs[0].get("error", ""), "refused upstream recorded as error flow")
+        # The proxy gives up on an upstream after 10 s; a refused port must be noticed well before that
+        # (Windows signals the failure through select()'s exceptfds, not writefds).
+        check(refused_seconds < 6, f"refused upstream noticed without waiting for the 10 s timeout ({refused_seconds:.1f} s)")
         engine.request("POST", "/api/proxy/stop", {})
 
         print("Exports and imports")
@@ -322,6 +366,7 @@ def main():
         check(pcapng[:4] == b"\x0a\x0d\x0d\x0a", "pcapng export")
         status, ifs = engine.request("GET", "/api/interfaces")
         check(status == 200 and "interfaces" in ifs, "interface listing answers")
+        print(f"  info capture: available={ifs.get('available')} interfaces={len(ifs.get('interfaces', []))} error={ifs.get('error', '')!r}")
         print(f"\nartifacts kept in {tmp}" if failures else "")
     finally:
         for p in procs:

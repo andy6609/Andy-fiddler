@@ -33,7 +33,7 @@ void protectKey(const std::filesystem::path& p){
 }
 Tls::Tls(std::string d):directory(std::move(d)){}
 Tls::~Tls(){for(auto& [h,c]:leaves)SSL_CTX_free(c);if(client)SSL_CTX_free(client);if(ca)X509_free(ca);if(caKey)EVP_PKEY_free(caKey);if(leafKey)EVP_PKEY_free(leafKey);}
-void Tls::initialize(){std::lock_guard lock(mutex);if(client)return;std::filesystem::create_directories(directory);auto certPath=utf8Path(directory)/"root-ca.pem";auto keyPath=utf8Path(directory)/"root-key.pem";
+void Tls::initialize(){std::lock_guard lock(mutex);if(client)return;std::filesystem::create_directories(utf8Path(directory));/* not path(std::string): that is the ANSI code page on Windows */auto certPath=utf8Path(directory)/"root-ca.pem";auto keyPath=utf8Path(directory)/"root-key.pem";
     if(!ca){
         bool certExists=std::filesystem::exists(certPath),keyExists=std::filesystem::exists(keyPath);if(certExists!=keyExists)throw std::runtime_error("Incomplete CA: root-ca.pem and root-key.pem must both exist");
         if(certExists){ca=parseCert(readFile(certPath));caKey=parseKey(readFile(keyPath));require(ca&&caKey&&X509_check_private_key(ca,caKey)==1,"CA certificate/key unreadable or mismatched");}

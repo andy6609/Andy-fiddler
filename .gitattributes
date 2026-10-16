@@ -1,0 +1,2 @@
+# Windows PowerShell 5.1 reads BOM-less scripts in the ANSI code page (CP949 on Korean Windows): keep BOM + CRLF.
+*.ps1 text eol=crlf

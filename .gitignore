@@ -6,3 +6,5 @@
 *.pem
 /.cache/
 __pycache__/
+/.vcpkg-cache/
+/dist/

@@ -4,7 +4,9 @@
 
 > **현재 상태 (2026-10-15 두 번째 세션)**: 엔진, `web/app.js`, 테스트가 있다. macOS 개발 호스트에서 빌드, 단위 테스트, curl/nghttpd를 이용한 end-to-end 테스트, headless Chrome UI 조작까지 통과했다. **Windows 빌드, Npcap 실제 캡처, Windows 인증서 저장소, 실제 AI 서비스·에이전트 트래픽은 아직 검증하지 않았다.** 아래에서는 “구현됨”과 “검증됨”을 구분한다.
 
-관련 문서: [오픈소스 조사와 채택한 특징](OPEN-SOURCE-REFERENCES.md), [프로젝트 입구](../README.md).
+> **`windows` 브랜치 (2026-10-15 세 번째 세션)**: 사용자 요청 "브랜치 하나 파서 윈도우 버전으로 또 만들어봐". MSVC + vcpkg 빌드, C++17, Windows 전용 기능(프록시 연결 → 프로세스 귀속, 시스템 프록시 켜기/복원), lab v9·v10, GitHub Actions Windows CI 를 추가했다. **Windows 검증은 GitHub Actions 러너(Windows Server 2025)에서 돌린 테스트 결과뿐이다.** 실제 Windows 데스크톱 실행, Npcap 캡처, 인증서 신뢰 설치는 여전히 미검증. 무엇이 확인됐고 무엇이 아닌지, Windows 에서만 다르게 동작한 곳 11개는 [WINDOWS.md](WINDOWS.md) 가 기준이다.
+
+관련 문서: [Windows 버전](WINDOWS.md), [오픈소스 조사와 채택한 특징](OPEN-SOURCE-REFERENCES.md), [프로젝트 입구](../README.md).
 
 ## 1. 사용자가 만들려는 것과 이유
 
@@ -92,10 +94,10 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 
 | 파일 | 내용 | 검증 |
 |---|---|---|
-| `CMakeLists.txt` | C++20, OpenSSL, nghttp2, Threads, Windows 링크, 비Windows libpcap, 매 빌드마다 웹 자산 복사, CTest(core + integration) | macOS 클린 빌드 경고 0 |
+| `CMakeLists.txt` | C++17, OpenSSL, nghttp2, Threads, Windows 링크, 비Windows libpcap, 매 빌드마다 웹 자산 복사, CTest(core + integration) | macOS 클린 빌드 경고 0 |
 | `src/core.hpp/.cpp` | Flow/Packet/Store, body 1 MiB 캡, base64/SHA256, 세션 저장·복원(검증 후 교체), redact, HTML 보고서, 합성 sample | 단위 테스트 |
 | `src/packet.hpp/.cpp` | Ethernet/VLAN/IP/TCP/UDP/DNS/TLS 필드와 offset, pcap/pcapng 읽기·쓰기, TCP preview | 단위 테스트(경계·잘림·DNS 포인터 루프·패딩) |
-| `src/capture.cpp` | Windows Npcap 동적 로드, 인터페이스/BPF/캡처 스레드/통계 | macOS libpcap 경로는 인터페이스 목록만 확인(BPF 권한 없음). **Windows 미검증** |
+| `src/capture.cpp` | Windows Npcap 동적 로드, 인터페이스/BPF/캡처 스레드/통계. `pcap_stat` 은 Npcap SDK 1.16 헤더대로 6필드 (windows 브랜치) | macOS libpcap 경로는 인터페이스 목록만 확인(BPF 권한 없음). Windows 러너에선 "Npcap 미설치" 경로만. **라이브 캡처 미검증** |
 | `src/net.hpp` | socket/Channel/TLS/Proxy 인터페이스 | integration 테스트로 간접 검증 |
 | `src/tls.cpp` | 로컬 CA/leaf 생성, ALPN, upstream 검증, filesystem 경로 기반 PEM I/O, DER SHA-256 지문, Windows 사용자 ROOT 신뢰 | 지문은 openssl 출력과 일치. **신뢰 설치는 Windows 미검증** |
 | `src/proxy.cpp` | HTTP/1 중계, CONNECT, MITM/passthrough, framing, chunked trailer 기록, Upgrade 터널 | integration 테스트 |
@@ -103,13 +105,16 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 | `src/main.cpp` | 로컬 API, token/Host/Origin 검사, 정적 파일, CLI, Windows 브라우저 열기 | integration 테스트(403 경계 포함) |
 | `web/index.html`, `web/app.css` | 컨테이너, 밀도 높은 검사 도구 스타일 | Chrome 1440×900 스크린샷 |
 | `web/app.js` | 실시간/오프라인 공용 UI(아래 7절) | headless Chrome CDP 조작, JS 오류 0 |
-| `tests/core_tests.cpp` | 소켓 없는 단위 테스트 94개 검사 | 통과 |
-| `tests/integration_test.py` | curl → WireScope → 로컬 HTTP·HTTPS·nghttpd(h2) 서버, 46개 검사 | 통과 |
+| `src/process.cpp` (windows 브랜치) | accept 직후 `GetExtendedTcpTable` 로 연결 → PID, exe/경로/명령줄/부모 | Windows 러너: 직접 띄운 curl/python 의 PID·경로·명령줄·부모와 일치 |
+| `src/sysproxy.cpp` (windows 브랜치) | WinINET 시스템 프록시 켜기/복원, 백업 파일, 비정상 종료 감지 | Windows 러너: 레지스트리 반영, 프록시 인자 없는 Python urllib 가 따라옴, 4가지 복원 경로 |
+| `tests/core_tests.cpp` | 소켓 없는 단위 테스트 (windows 브랜치 104개) | 통과 (macOS, Windows) |
+| `tests/integration_test.py` | curl → WireScope → 로컬 HTTP·HTTPS·nghttpd(h2) 서버, 46개 검사. nghttpd 가 없으면 `tests/h2_server.py` | 통과 (macOS, Windows) |
+| `tests/windows_test.py` (windows 브랜치) | 프로세스 귀속, 시스템 프록시(CI 에서만), 한글 `--data` 경로 | Windows 러너 |
 | `third_party/` | cpp-httplib, nlohmann/json 단일 헤더와 LICENSE | — |
 
 | `lab/` (v1~v8) + `docs/lab/` | 사용자 요청(2026-10-15)으로 local-proxy-lab 처럼 개념별 학습 버전을 한국어 주석으로 만듦. 본체와 코드 공유 없음 | `tests/lab_smoke.py` 86개 검사 통과, v6 라이브 캡처는 미검증 |
 
-**없는 것**: Windows 빌드 스크립트·vcpkg manifest, CI, Windows 실제 캡처 증거, 실제 AI 서비스/에이전트 실험 기록.
+**없는 것**: Windows 실제 캡처 증거, 실제 Windows 데스크톱에서의 실행 기록, 실제 AI 서비스/에이전트 실험 기록. (빌드 스크립트·vcpkg manifest·Windows CI 는 windows 브랜치에 있다.)
 
 사용자 작업 스타일 참고: local-proxy-lab 처럼 버전을 나눠 쌓고, 한국어 주석(목적/핵심/흐름/이전 버전 대비 변화/함정/한계)을 두껍게 달고, 커밋을 작게 자주 나누는 것을 선호한다.
 
@@ -189,11 +194,11 @@ flow meta에 `port`가 추가되었고, HTTP/1 `protocol`은 실제 요청 버�
 ## 9. 다음 AI의 실행 순서
 
 1. 이 문서를 읽고 `git status`와 `ctest --test-dir build --output-on-failure`로 현재 상태를 확인한다. 이미 합의한 목표를 다시 묻지 않는다.
-2. **Windows 빌드**: vcpkg manifest(openssl, nghttp2) 또는 설치 안내, MSVC `/W4` 경고 정리, `pcap_stat` ABI 확인(위 1번).
-3. **Windows 실제 검증**: Npcap 캡처(loopback 포함), CA 신뢰 설치·삭제, 브라우저 프록시 설정 후 HTTPS·h2 관찰. 결과와 실패를 그대로 기록한다.
+2. ~~**Windows 빌드**~~: windows 브랜치에서 완료 (vcpkg manifest, MSVC `/W4` 경고 0, `pcap_stat` 헤더 대조). [WINDOWS.md](WINDOWS.md) 참고.
+3. **Windows 실제 검증**: 실제 데스크톱에서 Npcap 캡처(loopback 포함), CA 신뢰 설치·삭제(확인 대화상자), Edge + "Use as system proxy" 로 HTTPS·h2 관찰. 결과와 실패를 그대로 기록한다. (러너에서 확인한 범위는 WINDOWS.md 3절)
 4. **AI 클라이언트 실험**: 같은 작업(예: 파일 첨부 후 질문)을 여러 클라이언트로 실행하고 세션 메타데이터(클라이언트·버전·행동)를 남긴 뒤 비교 화면과 보고서로 정리한다. 서비스명만으로 일반화하지 않는다.
 5. `Store` 메모리 상한(4번), proxy authority 엣지 케이스 테스트, 학습용 코드 포맷 정리.
-6. CI(GitHub Actions: macOS/Linux에서 ctest, Windows에서 빌드).
+6. CI: Windows 는 windows 브랜치의 `.github/workflows/windows.yml` (MSVC 빌드 + 전체 ctest). macOS/Linux job 은 아직 없다. GitHub 로그는 로그인해야 받을 수 있어서 결과는 annotation 으로도 남긴다 (`.github/ci_annotate.py`).
 
 현재 호스트 참고: cmake `/opt/homebrew/bin/cmake`, OpenSSL `/opt/homebrew/opt/openssl`, nghttp2 `/opt/homebrew/opt/libnghttp2`, `nghttpd`는 `/opt/homebrew/opt/nghttp2/bin`에 있다(PATH에는 없지만 CMake가 HINTS로 찾는다). macOS에서 live 캡처는 `/dev/bpf*` 권한이 없어 동작하지 않는다(Mac은 목표 OS가 아니다).
 

@@ -11,6 +11,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -51,6 +52,9 @@ def start(name, *args, env=None):
     return proc
 
 
+LOGS = []  # output of the lab programs a version started; printed when that version has failures
+
+
 def stop(proc):
     proc.terminate()
     try:
@@ -58,7 +62,9 @@ def stop(proc):
     except subprocess.TimeoutExpired:
         proc.kill()
         out, _ = proc.communicate()
-    return out.decode(errors="replace")
+    text = out.decode(errors="replace")
+    LOGS.append((proc.args[0], proc.returncode, text))
+    return text
 
 
 def read_flows(path):
@@ -162,11 +168,14 @@ def v2(tmp, h1):
     check(echo and base64.b64decode(echo["request"]["base64"]) == payload, "decrypted request body recorded")
     tunnels = [f for f in flows if f["method"] == "CONNECT"]
     check(any(t["observed"].get("clientAlpn") == "http/1.1" for t in tunnels), "ALPN http/1.1 recorded on the tunnel")
-    check(any("client TLS handshake failed" in t["error"] for t in tunnels), "untrusted-CA handshake failure recorded")
+    # Depending on the client the rejection fails SSL_accept, or arrives right after it (seen with curl/LibreSSL on Windows).
+    check(any(k in t["error"] for t in tunnels for k in ("client TLS handshake failed", "client ended TLS right after the handshake",
+                                                          "client closed the connection right after the handshake")),
+          f"untrusted-CA rejection recorded on the tunnel (tunnel errors: {[t['error'] for t in tunnels]})")
 
 
 def h2_server(tmp, files):
-    """nghttpd serving `files` (name -> bytes) over TLS with a response trailer."""
+    """nghttpd (or tests/h2_server.py) serving `files` (name -> bytes) over TLS with a response trailer."""
     if not os.path.exists(f"{tmp}/server.pem"):
         it.make_certs(tmp)
     docs = f"{tmp}/h2docs"
@@ -175,9 +184,9 @@ def h2_server(tmp, files):
         with open(f"{docs}/{name}", "wb") as f:
             f.write(data)
     port = it.free_port()
-    proc = subprocess.Popen([it.NGHTTPD, "--address=127.0.0.1", f"--htdocs={docs}", "--trailer=x-h2-trailer: yes", str(port),
+    proc = subprocess.Popen([*it.H2D, "--address=127.0.0.1", f"--htdocs={docs}", "--trailer=x-h2-trailer: yes", str(port),
                              f"{tmp}/server.key", f"{tmp}/server.pem"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.3)
+    it.wait_port(port)
     return port, proc
 
 
@@ -250,8 +259,8 @@ def udp_dns(name_bytes, ipv6=False, vlan=False):
     return eth + ip + udp
 
 
-def run(name, *args):
-    r = subprocess.run([f"{BUILD}/lab/{name}", *args], capture_output=True, env=dict(os.environ, NO_COLOR="1"))
+def run(name, *args, cwd=None, env=None):
+    r = subprocess.run([f"{BUILD}/lab/{name}", *args], capture_output=True, cwd=cwd, env=dict(env or os.environ, NO_COLOR="1"))
     return r.returncode, r.stdout.decode(errors="replace")
 
 
@@ -337,7 +346,7 @@ def v5(tmp, h1):
     rc, out = run("v5_tcp_stream", f"{tmp}/mixed.pcap")
     check(rc == 0 and "(SYN" not in out and "1 connections" in out, "UDP ignored, SYN seen in synthetic capture")
     rc, out = run("v5_tcp_stream", path, "1")
-    check(request.decode() in out, "out-of-order client segments put back in order")
+    check(request.decode() in out, f"out-of-order client segments put back in order ({out[-200:]!r})")
     check("#4  out of order: arrived before #5" in out, "out-of-order arrival reported")
     check("#7 retransmission" in out, "retransmitted server segment detected and dropped")
     check(f"GAP  {len(r2)} bytes not captured" in out and f"«{len(r2)} bytes missing»hello" in out, "missing bytes shown as a gap, not invented")
@@ -468,16 +477,60 @@ def v8(tmp, h1):
     with open(src, "a") as f:
         f.write(json.dumps(evil) + "\n")
     rc, out = run("v8_diff_report", src, "1", "2", "--report", f"{tmp}/r.html")
-    html = open(f"{tmp}/r.html").read()
+    html = open(f"{tmp}/r.html", encoding="utf-8").read()  # not the Windows ANSI default: the report has "·"
     check(rc == 0 and "<script" not in html and "&lt;script&gt;alert(1)&lt;/script&gt;" in html, "report escapes captured markup, contains no script")
     check("default-src 'none'" in html and "4 added · 0 removed · 1 changed" in html and "topsecret" in html, "report: CSP, diff summary, raw values")
     rc, out = run("v8_diff_report", src, "1", "2", "--report", f"{tmp}/rr.html", "--redact")
-    html = open(f"{tmp}/rr.html").read()
+    html = open(f"{tmp}/rr.html", encoding="utf-8").read()
     check("topsecret" not in html and "sk-secret" not in html and "session=abc" not in html and "u2" not in html, "redacted report hides query, auth, cookie, diff values")
     check("$.metadata.user_id" in html and "pattern-based" in html, "redacted report keeps paths and says redaction is pattern-based")
 
 
-VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7), ("v8", v8)]
+def v9(tmp, h1):
+    print("v9_win_owner")
+    rc, out = run("v9_win_owner", "--self")
+    if os.name != "nt":
+        check(rc == 0 and "Windows" in out, "prints that it is Windows-only and exits 0")
+        return
+    me = re.search(r"client 쪽 줄의 owning pid = (\d+), 이 프로그램의 pid = (\d+)", out)
+    check(rc == 0 and "[client row]" in out and "[proxy row]" in out, "--self: loopback pair found as two rows (client side, proxy side)")
+    check(me and me[1] == me[2], f"--self: client-side row's owning PID is the demo itself ({me.groups() if me else out[-300:]})")
+    rc, out = run("v9_win_owner", "--port", str(h1))
+    listen = [line for line in out.splitlines() if line.startswith("LISTEN") and f"127.0.0.1:{h1} " in line]
+    check(listen and f"pid {os.getpid()} " in listen[0], f"--port: this test's HTTP server LISTEN row carries this test's PID ({listen[:1]})")
+
+
+def v10(tmp, h1):
+    print("v10_win_sysproxy")
+    env = dict(os.environ, HTTPS_PROXY="http://127.0.0.1:9", NODE_EXTRA_CA_CERTS="C:\\lab\\ca.pem")
+    rc, out = run("v10_win_sysproxy", env=env)
+    if os.name != "nt":
+        check(rc == 0 and "Windows" in out, "prints that it is Windows-only and exits 0")
+        return
+    check(rc == 0 and "[1] WinINET" in out and "[2] WinHTTP" in out and "[3]" in out, "shows WinINET, WinHTTP and environment side by side")
+    check("http://127.0.0.1:9" in out and "C:\\lab\\ca.pem" in out, "environment section shows the variables this process was given")
+    check("access type" in out, f"WinHTTP default configuration read ({[l for l in out.splitlines() if 'access type' in l][:1]})")
+    if os.environ.get("CI") != "true" and os.environ.get("WIRESCOPE_TEST_SYSPROXY") != "1":
+        print("  skip --set/--restore (changes this user's proxy setting; set WIRESCOPE_TEST_SYSPROXY=1)")
+        return
+    import winreg
+    def proxy_server():
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        try:
+            return winreg.QueryValueEx(key, "ProxyEnable")[0], winreg.QueryValueEx(key, "ProxyServer")[0]
+        except FileNotFoundError:
+            return winreg.QueryValueEx(key, "ProxyEnable")[0], ""
+    before = proxy_server()
+    rc, out = run("v10_win_sysproxy", "--set", "18999", cwd=tmp)
+    check(rc == 0 and proxy_server() == (1, "127.0.0.1:18999") and os.path.exists(f"{tmp}/v10-proxy-backup.json"),
+          f"--set writes WinINET (registry now {proxy_server()}) after saving a backup")
+    rc, out = run("v10_win_sysproxy", "--restore", cwd=tmp)
+    after = proxy_server()
+    check(rc == 0 and after[0] == before[0] and (after[1] or "") == (before[1] or "") and not os.path.exists(f"{tmp}/v10-proxy-backup.json"),
+          f"--restore brings back {before} (now {after}) and deletes the backup")
+
+
+VERSIONS = [("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5), ("v6", v6), ("v7", v7), ("v8", v8), ("v9", v9), ("v10", v10)]
 
 
 def main():
@@ -485,7 +538,15 @@ def main():
     h1 = it.serve(http.server.ThreadingHTTPServer(("127.0.0.1", it.free_port()), it.Handler)).server_address[1]
     for name, fn in VERSIONS:
         if not ONLY or name in ONLY:
-            fn(tmp, h1)
+            before = len(failures)
+            LOGS.clear()
+            try:
+                fn(tmp, h1)
+            finally:
+                if len(failures) > before or sys.exc_info()[0]:
+                    for prog, code, text in LOGS:
+                        tail = "\n".join(text.splitlines()[-15:])
+                        print(f"  log  {os.path.basename(prog)} exit={code}:\n{tail}")
     print(f"{len(failures)} failures")
     return 1 if failures else 0
 

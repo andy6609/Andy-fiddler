@@ -9,7 +9,15 @@ function(lab_version name)
   if(WIN32)
     target_link_libraries(${name} PRIVATE ws2_32)
   endif()
-  set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lab)
+  if(MSVC)
+    # /utf-8: 소스의 한국어 주석/문자열을 UTF-8 로 읽게 한다 (없으면 한국어 Windows 는 CP949 로 읽어 깨진다).
+    # _CRT_SECURE_NO_WARNINGS: fopen/localtime/getenv 의 C4996 "안전하지 않음" 경고 끔 (학습용 코드).
+    target_compile_options(${name} PRIVATE /utf-8 /W3)
+    target_compile_definitions(${name} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+  endif()
+  # $<1:...> 생성기 식: Visual Studio 같은 multi-config 생성기가 lab/Release/ 를 덧붙이지 않게 한다
+  # (tests/lab_smoke.py 는 <build>/lab/<이름> 을 찾는다).
+  set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<1:${CMAKE_BINARY_DIR}/lab>)
 endfunction()
 lab_version(v1_flow_recorder)
 lab_version(v2_tls_recorder LIBS OpenSSL::SSL OpenSSL::Crypto)
@@ -29,3 +37,11 @@ else()
 endif()
 lab_version(v7_inspector_api)
 lab_version(v8_diff_report)
+# v9/v10: Windows 에서만 의미 있는 개념 (연결 -> 프로세스, 시스템 프록시 설정). 다른 OS 에선 안내 한 줄만 출력하고 끝.
+if(WIN32)
+  lab_version(v9_win_owner LIBS iphlpapi)
+  lab_version(v10_win_sysproxy LIBS wininet advapi32)
+else()
+  lab_version(v9_win_owner)
+  lab_version(v10_win_sysproxy)
+endif()

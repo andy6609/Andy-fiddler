@@ -27,7 +27,7 @@ std::string ipv4Frame(uint8_t proto, const std::string& transport) {
     std::string eth(12, '\x11'); eth += "\x08\x00"s;
     std::string ip(20, '\0'); ip[0] = 0x45; put16(ip, 2, uint16_t(20 + transport.size())); ip[8] = 64; ip[9] = char(proto);
     ip[12] = 10; ip[13] = 0; ip[14] = 0; ip[15] = 1;
-    ip[16] = char(93); ip[17] = char(184); ip[18] = char(216); ip[19] = char(34);
+    ip[16] = char(93); ip[17] = '\xb8'; ip[18] = '\xd8'; ip[19] = char(34);  // 184, 216 as literals: char(184) truncates (MSVC C4310)
     return eth + ip + transport;
 }
 std::string tcp(uint16_t sp, uint16_t dp, uint32_t seq, uint8_t flags, const std::string& payload) {
@@ -71,7 +71,7 @@ void packets() {
     CHECK_EQ(p.info["dstPort"].get<int>(), 80);
     CHECK_EQ(p.info["source"].get<std::string>(), "10.0.0.1:51000"s);
     CHECK_EQ(p.info["payloadOffset"].get<size_t>(), size_t(54));
-    CHECK(p.info["summary"].get<std::string>().starts_with("GET / HTTP/1.1"));
+    CHECK(startsWith(p.info["summary"].get<std::string>(),"GET / HTTP/1.1"));
     CHECK(!p.info.contains("error"));
     // Every reported field must point at the bytes it describes.
     bool sawSource = false;
@@ -201,12 +201,34 @@ void exports() {
     CHECK(script.find("<!--") == std::string::npos);
 #endif
 }
+
+// Windows process attribution is stored on the flow; the list carries only pid/name, exports may hide the rest.
+void processRecord() {
+    Store s;
+    json who = {{"pid", 4242}, {"name", "node.exe"}, {"path", "C:\\Users\\someone\\AppData\\node.exe"},
+                {"commandLine", "node.exe cli.js --api-key sk-secret"}, {"parentPid", 100}, {"parentName", "pwsh.exe"}};
+    auto id = s.createFlow({{"method", "GET"}, {"host", "api.example"}, {"path", "/"}, {"process", who}});
+    auto listed = s.snapshot()["flows"][0]["process"];
+    CHECK_EQ(listed.size(), size_t(2));
+    CHECK_EQ(listed["pid"].get<int>(), 4242);
+    CHECK_EQ(listed["name"].get<std::string>(), "node.exe"s);
+    CHECK(s.flow(id)["process"] == who);
+    auto archive = s.archive();
+    CHECK(archive["flows"][0]["process"] == who);
+    Store copy; copy.restore(archive);
+    CHECK(copy.flow(id)["process"] == who);  // survives .wscope round trip
+    auto redacted = redactedArchive(archive)["flows"][0]["process"];
+    CHECK_EQ(redacted["commandLine"].get<std::string>(), "[redacted]"s);
+    CHECK_EQ(redacted["path"].get<std::string>(), "[redacted]"s);
+    CHECK_EQ(redacted["pid"].get<int>(), 4242);
+    CHECK_EQ(redacted["parentName"].get<std::string>(), "pwsh.exe"s);
+}
 }
 
 int main() {
     for (auto& [name, fn] : std::vector<std::pair<const char*, void (*)()>>{
              {"encoding", encoding}, {"body limit", bodyLimit}, {"packets", packets}, {"capture files", captureFiles},
-             {"stream gaps", streamGaps}, {"sessions", sessions}, {"exports", exports}}) {
+             {"stream gaps", streamGaps}, {"sessions", sessions}, {"exports", exports}, {"process record", processRecord}}) {
         try { fn(); } catch (const std::exception& e) { ++failures; std::cerr << name << ": unexpected exception: " << e.what() << "\n"; }
     }
     std::cout << checks << " checks, " << failures << " failures\n";

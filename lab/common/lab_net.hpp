@@ -42,11 +42,26 @@
   static const sock_t BAD_SOCK = -1;
 #endif
 
+#include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
 namespace lab {
+
+// stdout 을 줄 단위로 바로 내보낸다 (파이프로 읽는 테스트나 다른 프로그램이 한 줄을 기다리며 멈추지 않게).
+// 함정 (Windows 에서 실제로 걸림): MSVC CRT 에는 줄 버퍼링이 없다 (_IOLBF 가 _IOFBF 와 같다).
+//   게다가 setvbuf(stdout, nullptr, _IOLBF, 0) 처럼 크기 0 을 주면 "invalid parameter" 로 프로세스가 그 자리에서 종료된다.
+//   -> Windows 는 버퍼링을 아예 끈다(_IONBF). 콘솔 코드 페이지도 UTF-8 로 (한국어 출력이 안 깨지게).
+inline void lineBufferedStdout() {
+#ifdef _WIN32
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    SetConsoleOutputCP(CP_UTF8);
+#else
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
+}
 
 // 프로그램 시작할 때 한 번. (TCP_toy 의 WSAStartup 자리)
 inline void netInit() {
@@ -100,6 +115,19 @@ inline bool sendAll(sock_t s, const char* data, size_t n) {
     return true;
 }
 inline bool sendAll(sock_t s, const std::string& data) { return sendAll(s, data.data(), data.size()); }
+
+// 마지막 소켓 호출이 실패한 OS 이유. 리셋(RST)은 어떤 TLS 클라이언트가 인증서를 거부하는 방식이기도 하다.
+inline std::string lastSocketError() {
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    if (e == WSAECONNRESET) return "connection reset by peer (WSAECONNRESET 10054)";
+    if (e == WSAECONNABORTED) return "connection aborted (WSAECONNABORTED 10053)";
+#else
+    int e = errno;
+    if (e == ECONNRESET) return "connection reset by peer (ECONNRESET)";
+#endif
+    return "socket error " + std::to_string(e);
+}
 
 // 127.0.0.1 에만 listen. (0.0.0.0 으로 열면 같은 네트워크의 남이 내 프록시를 쓸 수 있다)
 inline sock_t listenLocal(uint16_t port) {
