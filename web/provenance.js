@@ -81,6 +81,18 @@
   // Views of one body
   // ---------------------------------------------------------------------------
 
+  // JSON: each string value becomes its own view, already unescaped (\n, \", \uXXXX), with its path.
+  // That is where file contents usually travel: inside a JSON string in a chat or tool-result field.
+  const MIN_STRING = 4;
+  const keyPath = (k) => (/^[A-Za-z_$][\w$-]*$/.test(k) ? `.${k}` : `[${JSON.stringify(k)}]`);
+  function jsonStrings(value, path, out) {
+    if (typeof value === 'string') { if (value.length >= MIN_STRING) out.push([path, value]); return out; }
+    if (Array.isArray(value)) { value.forEach((x, i) => jsonStrings(x, `${path}[${i}]`, out)); return out; }
+    if (value && typeof value === 'object') for (const k of Object.keys(value)) jsonStrings(value[k], path + keyPath(k), out);
+    return out;
+  }
+  function tryJson(text) { try { return { ok: true, value: JSON.parse(text) }; } catch { return { ok: false }; } }
+
   // A view is { flowId, side, locator, transforms, text }. `notes` collects what could not be looked at.
   function makeView(flow, side, locator, transforms, text) {
     return { flowId: flow.id, side, locator, transforms, text };
@@ -108,7 +120,13 @@
       }
     }
     const views = [];
-    if (isMostlyText(base)) views.push(makeView(flow, side, 'body', transforms, decodeText(base)));
+    if (!isMostlyText(base)) return views;
+    const text = decodeText(base);
+    views.push(makeView(flow, side, 'body', transforms, text));
+    const parsed = tryJson(text);
+    if (parsed.ok) {
+      for (const [path, value] of jsonStrings(parsed.value, '$', [])) views.push(makeView(flow, side, path, [...transforms, 'json'], value));
+    }
     return views;
   }
 
@@ -121,5 +139,5 @@
     return { views, notes };
   }
 
-  return { b64ToBytes, decodeText, isMostlyText, headerValue, decompress, bodyViews, archiveViews };
+  return { b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, bodyViews, archiveViews };
 });

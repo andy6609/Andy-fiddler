@@ -64,6 +64,23 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(notes.some((n) => /br is not decoded/.test(n.note)), 'unsupported encoding is reported');
 }
 
+// --- JSON string values --------------------------------------------------------
+{
+  const fileText = 'const KEY = "WSCANARY-cfg-9";\nexport default KEY;\n';
+  const body = JSON.stringify({ model: 'm', messages: [{ role: 'user', content: [{ type: 'tool_result', content: fileText }] }], 'odd.key': 'value here' });
+  const { views } = await P.archiveViews({ flows: [flow(20, { req: body })] });
+  const v = views.find((x) => x.locator === '$.messages[0].content[0].content');
+  check(v && v.text === fileText, 'escaped file text comes back unescaped inside its JSON string view');
+  check(v && v.transforms.join() === 'json', 'JSON extraction is recorded as a transform');
+  check(views.some((x) => x.locator === '$["odd.key"]'), 'keys that are not identifiers are bracketed in the path');
+  check(!views.some((x) => x.text === 'm'), 'very short strings are skipped');
+  check(views[0].text.includes('\\n'), 'the raw view still shows the escaped form');
+}
+{
+  const { views } = await P.archiveViews({ flows: [flow(21, { req: '{"a": "unterminated', res: '' })] });
+  check(views.length === 1 && views[0].locator === 'body', 'invalid JSON keeps only the raw view');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
