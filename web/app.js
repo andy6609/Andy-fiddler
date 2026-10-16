@@ -1527,7 +1527,49 @@
         <div class="spacer"></div>
         <button class="flat" data-action="trace-rerun" title="Read the session again and redo the analysis">Re-run</button>
       </div>
+      ${find ? `<div class="searchbar">
+        <input type="search" id="traceQuery" spellcheck="false" placeholder="Text to find in request and response bodies, e.g. WSCANARY-" value="${esc(S.trace.query)}" aria-label="Find in bodies">
+        <label class="small trace-case"><input type="checkbox" data-action="trace-case" ${S.trace.caseSensitive ? 'checked' : ''}> Match case</label>
+      </div>` : ''}
       <div class="table-wrap" id="tableWrap"></div>`;
+  }
+
+  const transformBadges = (t) => (t.length ? t.map((x) => `<span class="badge">${esc(x)}</span>`).join(' ') : '<span class="muted small">as captured</span>');
+  const sideLabel = (side) => (side === 'request' ? '↑ request' : '↓ response');
+  function flowLabel(id) {
+    const f = S.flowById.get(id) || (S.trace.analysis ? null : null);
+    return f ? `<span class="method ${esc(String(f.method || '').toLowerCase())}">${esc(f.method)}</span> <span class="path" style="display:inline">${esc(f.host)}${esc(f.path)}</span>` : '';
+  }
+  function excerptHtml(x) {
+    const cls = x.hex ? ' class="mono"' : '';
+    return `<span${cls}>${esc(x.before)}<mark>${esc(x.match)}</mark>${esc(x.after)}</span>`;
+  }
+
+  function findTable() {
+    const T = S.trace;
+    if (!T.query) {
+      return `<div class="empty">${icon('list')}<strong>Search inside every body</strong>
+        <p>Bodies are searched after undoing gzip/deflate, JSON escaping, SSE framing, base64 and multipart, so text that left in a JSON string or an attachment is found as you would type it.</p></div>`;
+    }
+    if (!T.hits || !T.hits.length) return `<div class="empty">${icon('list')}<strong>No body contains “${esc(T.query)}”</strong>${limitsNotice()}</div>`;
+    return `${T.hitsTruncated ? '<div class="notice" style="margin:10px 12px 0">Too many hits; the list is cut. Narrow the search.</div>' : ''}
+      <table class="traffic"><colgroup><col style="width:74px"><col style="width:88px"><col style="width:28%"><col style="width:110px"><col></colgroup>
+      <thead><tr><th>Request</th><th>Side</th><th>Where</th><th>How</th><th>Context</th></tr></thead>
+      <tbody>${T.hits.map((h, i) => `<tr data-action="trace-hit" data-i="${i}" class="${S.selected?.kind === 'hit' && S.selected.id === i ? 'selected' : ''}">
+        <td class="id">#${h.flowId}</td><td class="small">${sideLabel(h.side)}</td><td class="mono small" title="${esc(h.locator)}">${esc(h.locator)}</td>
+        <td class="small">${transformBadges(h.transforms)}</td><td class="small trace-excerpt">${excerptHtml(h.excerpt)}</td></tr>`).join('')}</tbody></table>`;
+  }
+
+  // What the analysis could not look at, said plainly next to the results.
+  function limitsNotice() {
+    const a = S.trace.analysis;
+    if (!a) return '';
+    const items = [];
+    if (a.bodyLimit) items.push(`Only the first ${fmtBytes(a.bodyLimit)} of each body is captured, so bytes past that are never searched.`);
+    const cut = a.notes.filter((n) => /only the first/.test(n.note)).length;
+    if (cut) items.push(`${cut} bodies were cut at that limit.`);
+    for (const n of a.notes.filter((x) => !/only the first/.test(x.note)).slice(0, 5)) items.push(`#${n.flowId} ${n.side}: ${n.note}`);
+    return items.length ? `<div class="notice trace-limits">${items.map(esc).join('<br>')}</div>` : '';
   }
 
   function traceStatus() {
@@ -1540,12 +1582,62 @@
   function renderTraceTable() {
     const wrap = $('#tableWrap');
     if (!wrap || !isTraceView()) return;
+    const status = traceStatus();
+    if (status) { wrap.innerHTML = status; return; }
+    if (S.view === 'find') {
+      wrap.innerHTML = findTable();
+      $('#rowCount').textContent = S.trace.hits ? String(S.trace.hits.length) : '';
+      return;
+    }
     const a = S.trace.analysis;
-    wrap.innerHTML = traceStatus() || (a ? `<p class="muted small" style="padding:16px">${a.viewCount} body views from ${S.flows.length} requests.</p>` : '');
+    wrap.innerHTML = a ? `<p class="muted small" style="padding:16px">${a.viewCount} body views from ${S.flows.length} requests.</p>` : '';
   }
 
-  function traceInspector() { return ''; }
-  function moveTraceSelection() {}
+  function traceList() { return S.view === 'find' ? S.trace.hits || [] : []; }
+
+  function selectTrace(kind, i) {
+    const item = traceList()[i];
+    if (!item) return;
+    S.selected = { kind, id: i };
+    S.detail = item;
+    for (const tr of $$('#tableWrap tr.selected')) tr.classList.remove('selected');
+    const row = $(`#tableWrap tr[data-i="${i}"]`);
+    if (row) { row.classList.add('selected'); row.scrollIntoView({ block: 'nearest' }); }
+    renderInspector();
+  }
+  function moveTraceSelection(delta) {
+    const list = traceList();
+    if (!list.length) return;
+    const kind = S.view === 'find' ? 'hit' : 'match';
+    const cur = S.selected?.kind === kind ? S.selected.id : -1;
+    selectTrace(kind, cur < 0 ? (delta > 0 ? 0 : list.length - 1) : Math.max(0, Math.min(list.length - 1, cur + delta)));
+  }
+
+  function traceInspector(sel, item) {
+    if (sel.kind === 'hit') return hitInspector(item);
+    return '';
+  }
+
+  function hitInspector(h) {
+    return `
+      <div class="inspector-header">
+        <div class="inspector-title"><strong>Found in request #${h.flowId}</strong></div>
+        <div class="inspector-url">${flowLabel(h.flowId)}</div>
+      </div>
+      <div class="inspector-content">
+        <dl class="kv">
+          <dt>side</dt><dd>${esc(h.side)}</dd>
+          <dt>where</dt><dd>${esc(h.locator)}</dd>
+          <dt>how</dt><dd>${transformBadges(h.transforms)}</dd>
+          <dt>offset</dt><dd>${esc(h.offset)} in that view${h.binary ? ' (bytes)' : ' (characters)'}</dd>
+        </dl>
+        <div class="section" style="margin-top:14px"><div class="section-title">Context</div><pre class="code">${excerptHtml(h.excerpt)}</pre></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="primary" data-action="trace-open-flow" data-id="${h.flowId}" data-side="${h.side}">Open request #${h.flowId}</button>
+          <button data-action="trace-open-packets" data-id="${h.flowId}">Packets on its connection</button>
+        </div>
+      </div>`;
+  }
 
   // ---------------------------------------------------------------------------
   // Dialogs
@@ -1697,6 +1789,21 @@
 
   const ACTIONS = {
     category: (el) => setView(el.dataset.view, el.dataset.cat),
+    'trace-rerun': () => runAnalysis(true),
+    'trace-case': (el) => { S.trace.caseSensitive = el.checked; runSearch(); renderTraceTable(); renderSidebar(); },
+    'trace-hit': (el) => selectTrace('hit', Number(el.dataset.i)),
+    'trace-open-flow': (el) => {
+      S.flowTab = el.dataset.side === 'response' ? 'response' : 'request';
+      S.view = 'flows'; S.category = 'all'; S.connection = '';
+      renderSidebar(); renderCenter(); renderTable();
+      return select('flow', Number(el.dataset.id));
+    },
+    'trace-open-packets': (el) => {
+      S.flowTab = 'packets';
+      S.view = 'flows'; S.category = 'all'; S.connection = '';
+      renderSidebar(); renderCenter(); renderTable();
+      return select('flow', Number(el.dataset.id));
+    },
     connection: (el) => { S.connection = S.connection === el.dataset.key ? '' : el.dataset.key; renderSidebar(); renderTable(); },
     'clear-connection': () => { S.connection = ''; renderSidebar(); renderTable(); },
     process: (el) => { const pid = Number(el.dataset.pid); S.processPid = S.processPid === pid ? null : pid; renderSidebar(); renderTable(); },
@@ -1844,8 +1951,10 @@
 
     const filterLater = debounce(() => renderTable(), 120);
     const ignoreLater = debounce(() => { const c = $('#cmpContent'); if (c) c.innerHTML = compareContent(); }, 250);
+    const searchLater = debounce(() => { runSearch(); renderTraceTable(); renderSidebar(); }, 250);
     document.addEventListener('input', (e) => {
       const t = e.target;
+      if (t.id === 'traceQuery') { S.trace.query = t.value; searchLater(); return; }
       if (t.id === 'search') { S.search[S.view] = t.value; filterLater(); }
       else if (t.id === 'cmpIgnore') { S.cmp.ignore = t.value; ignoreLater(); }
       else if (t.dataset?.input === 'sse-join') {
