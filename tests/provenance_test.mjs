@@ -336,6 +336,41 @@ const withTail = (payload) => new Uint8Array(Buffer.concat([payload, Buffer.from
   check(p2.length < Buffer.byteLength(second) && P.inflateRaw(withTail(p2)).error !== '', 'inflateRaw: the second message really points into the first (fails without the window)');
 }
 
+// --- WebSocket frames ---------------------------------------------------------------
+// One frame as it goes over the wire. Clients mask with a 4-byte key; servers do not mask.
+function wsFrame(payload, { opcode = 1, fin = true, rsv1 = false, mask = null } = {}) {
+  const data = Buffer.from(payload);
+  const len = data.length, m = mask ? 0x80 : 0;
+  const head = [(fin ? 0x80 : 0) | (rsv1 ? 0x40 : 0) | opcode];
+  if (len < 126) head.push(m | len);
+  else if (len < 65536) head.push(m | 126, len >> 8, len & 255);
+  else head.push(m | 127, 0, 0, 0, 0, (len >>> 24) & 255, (len >>> 16) & 255, (len >>> 8) & 255, len & 255);
+  if (!mask) return Buffer.concat([Buffer.from(head), data]);
+  return Buffer.concat([Buffer.from(head), Buffer.from(mask), Buffer.from(data.map((b, i) => b ^ mask[i & 3]))]);
+}
+const MASK = [0x37, 0xfa, 0x21, 0x3d];
+{
+  const hello = P.wsFrames(new Uint8Array(wsFrame('Hello', { mask: MASK })));
+  check(hello.frames.length === 1 && hello.frames[0].masked && Buffer.from(hello.frames[0].payload).toString() === 'Hello' && !hello.stop, 'ws: a masked client frame is unmasked');
+  const mid = 'x'.repeat(300), big = 'y'.repeat(70000);
+  const sizes = P.wsFrames(new Uint8Array(Buffer.concat([wsFrame(mid), wsFrame(big, { mask: MASK })])));
+  check(sizes.frames.length === 2 && sizes.frames[0].payload.length === 300 && sizes.frames[1].payload.length === 70000, 'ws: 16-bit and 64-bit payload lengths');
+
+  const pieces = Buffer.concat([wsFrame('first half, ', { fin: false, mask: MASK }), wsFrame('ping', { opcode: 9, mask: MASK }), wsFrame('second half', { opcode: 0, mask: MASK })]);
+  const joined = P.wsMessages(P.wsFrames(new Uint8Array(pieces)).frames);
+  check(joined.messages.length === 1 && Buffer.from(joined.messages[0].payload).toString() === 'first half, second half' && joined.messages[0].frames === 2 && joined.control === 1, 'ws: a fragmented message is joined; a ping between the pieces is counted, not merged');
+
+  const two = Buffer.concat([wsFrame('done'), wsFrame('cut off here')]);
+  const cut = P.wsFrames(new Uint8Array(two.subarray(0, two.length - 3)));
+  check(cut.frames.length === 1 && cut.stop === 'incomplete' && cut.consumed === wsFrame('done').length, 'ws: a frame cut by the capture limit stops parsing and is reported');
+  const open = P.wsMessages(P.wsFrames(new Uint8Array(wsFrame('never finished', { fin: false }))).frames);
+  check(open.messages.length === 1 && open.messages[0].complete === false, 'ws: a message whose last fragment never came is kept and marked incomplete');
+  check(/invalid frame at byte 4/.test(P.wsFrames(new Uint8Array(Buffer.concat([wsFrame('ok'), Buffer.from([0x83, 0x00])]))).stop), 'ws: a reserved opcode stops parsing where it is');
+
+  check(P.wsDeflate('permessage-deflate; client_max_window_bits=15').clientNoContext === false, 'ws: permessage-deflate without no_context_takeover keeps the window');
+  check(P.wsDeflate('permessage-deflate; server_no_context_takeover').serverNoContext === true && P.wsDeflate('') === null, 'ws: extension parameters and absence are read from the header');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);

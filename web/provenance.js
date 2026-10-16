@@ -203,6 +203,67 @@
   }
 
   // ---------------------------------------------------------------------------
+  // WebSocket frames (RFC 6455)
+  // ---------------------------------------------------------------------------
+
+  // After a 101 upgrade the proxy records each direction's bytes as they went over the wire: a stream of frames.
+  // Client-to-server frames are XOR-masked, so file contents are invisible in the raw body until the mask is removed.
+  // Parsing stops at the first thing that is not a valid frame and says where, instead of guessing.
+  function wsFrames(bytes) {
+    const frames = [];
+    let p = 0, stop = '';
+    while (p < bytes.length) {
+      if (p + 2 > bytes.length) { stop = 'incomplete'; break; }
+      const b0 = bytes[p], b1 = bytes[p + 1], opcode = b0 & 0x0f;
+      let len = b1 & 0x7f, head = 2;
+      if (len === 126) { if (p + 4 > bytes.length) { stop = 'incomplete'; break; } len = (bytes[p + 2] << 8) | bytes[p + 3]; head = 4; }
+      else if (len === 127) { if (p + 10 > bytes.length) { stop = 'incomplete'; break; } len = 0; for (let k = 2; k < 10; k++) len = len * 256 + bytes[p + k]; head = 10; }
+      const control = opcode >= 8;
+      if ((b0 & 0x30) || ![0, 1, 2, 8, 9, 10].includes(opcode) || (control && (len > 125 || !(b0 & 0x80)))) { stop = `invalid frame at byte ${p}`; break; }
+      const masked = (b1 & 0x80) !== 0, keyAt = p + head;
+      if (masked) head += 4;
+      if (p + head + len > bytes.length) { stop = 'incomplete'; break; }
+      const payload = bytes.slice(p + head, p + head + len);
+      if (masked) for (let k = 0; k < payload.length; k++) payload[k] ^= bytes[keyAt + (k & 3)];
+      frames.push({ fin: (b0 & 0x80) !== 0, rsv1: (b0 & 0x40) !== 0, opcode, masked, payload, offset: p });
+      p += head + len;
+    }
+    return { frames, stop, consumed: p };
+  }
+
+  // Frames -> messages. A message is a text/binary frame plus its continuation frames; control frames (ping, pong,
+  // close) may sit between the pieces and are counted, not merged. Per RFC 7692 only the first frame carries RSV1.
+  function wsMessages(frames) {
+    const messages = [];
+    let cur = null, control = 0, orphans = 0;
+    const finish = (m, complete) => {
+      const size = m.parts.reduce((n, x) => n + x.length, 0);
+      const payload = new Uint8Array(size);
+      let o = 0;
+      for (const x of m.parts) { payload.set(x, o); o += x.length; }
+      messages.push({ opcode: m.opcode, compressed: m.compressed, payload, frames: m.parts.length, offset: m.offset, complete });
+    };
+    for (const f of frames) {
+      if (f.opcode >= 8) { control++; continue; }
+      if (f.opcode !== 0) {
+        if (cur) finish(cur, false);          // a new message started before the last one finished
+        cur = { opcode: f.opcode, compressed: f.rsv1, parts: [f.payload], offset: f.offset };
+      } else if (cur) cur.parts.push(f.payload);
+      else { orphans++; continue; }
+      if (f.fin) { finish(cur, true); cur = null; }
+    }
+    if (cur) finish(cur, false);              // cut by the capture limit or the end of the connection
+    return { messages, control, orphans };
+  }
+
+  // Sec-WebSocket-Extensions as accepted by the server, e.g. "permessage-deflate; client_max_window_bits=15".
+  function wsDeflate(value) {
+    const ext = String(value || '').split(',').map((x) => x.trim()).find((x) => /^permessage-deflate\b/i.test(x));
+    if (!ext) return null;
+    return { serverNoContext: /server_no_context_takeover/i.test(ext), clientNoContext: /client_no_context_takeover/i.test(ext) };
+  }
+
+  // ---------------------------------------------------------------------------
   // Views of one body
   // ---------------------------------------------------------------------------
 
@@ -657,5 +718,5 @@
     };
   }
 
-  return { inflateRaw, analyze, byteRuns, lineRuns, fragments, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  return { inflateRaw, wsFrames, wsMessages, wsDeflate, analyze, byteRuns, lineRuns, fragments, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });
