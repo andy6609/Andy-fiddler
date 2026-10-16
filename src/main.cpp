@@ -46,7 +46,7 @@ int main(int argc,char** argv){try{
     {int n=0;LPWSTR* wide=CommandLineToArgvW(GetCommandLineW(),&n);if(wide){args.clear();for(int i=0;i<n;++i)args.push_back(utf8(std::filesystem::path(wide[i])));LocalFree(wide);}}
 #endif
     const int argCount=int(args.size());
-    for(int i=1;i<argCount;++i){const std::string& arg=args[i];if(arg=="--port"&&i+1<argCount)port=std::stoi(args[++i]);else if(arg=="--data"&&i+1<argCount)data=args[++i];else if(arg=="--web"&&i+1<argCount)web=args[++i];else if(arg=="--no-open")open=false;else if(arg=="--sample")demo=true;else if(arg=="--help"){std::cout<<"WireScope [--port 17890] [--data DIR] [--web DIR] [--no-open] [--sample]\n";return 0;}else throw std::runtime_error("Unknown argument: "+arg);}
+    for(int i=1;i<argCount;++i){const std::string& arg=args[i];if(arg=="--port"&&i+1<argCount)port=std::stoi(args[++i]);else if(arg=="--data"&&i+1<argCount)data=args[++i];else if(arg=="--web"&&i+1<argCount)web=args[++i];else if(arg=="--no-open")open=false;else if(arg=="--sample")demo=true;else if(arg=="--body-limit"&&i+1<argCount)setBodyLimit(size_t(std::stod(args[++i])*1024*1024));else if(arg=="--help"){std::cout<<"WireScope [--port 17890] [--data DIR] [--web DIR] [--no-open] [--sample] [--body-limit MiB]\n";return 0;}else throw std::runtime_error("Unknown argument: "+arg);}
     if(port<1024||port>65535)throw std::runtime_error("UI port must be 1024–65535");
     auto webPath=utf8Path(web);const auto index=readFile(webPath/"index.html"),css=readFile(webPath/"app.css"),script=readFile(webPath/"app.js");
     Store store;Tls tls(data);Proxy proxy(store,tls);Capture capture(store);SystemProxy sysproxy(data);std::mutex controls;
@@ -61,7 +61,7 @@ int main(int argc,char** argv){try{
     server.set_post_routing_handler([](const httplib::Request&,httplib::Response& r){r.set_header("Cache-Control","no-store");r.set_header("X-Content-Type-Options","nosniff");r.set_header("X-Frame-Options","DENY");r.set_header("Content-Security-Policy","default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");});
     server.set_exception_handler([](const httplib::Request&,httplib::Response& r,std::exception_ptr p){r.status=400;try{std::rethrow_exception(p);}catch(const std::exception& e){output(r,{{"error",e.what()}});}catch(...){output(r,{{"error","Request failed"}});}});
     server.Get("/",[&](const auto&,auto& r){r.set_content(index,"text/html; charset=utf-8");});server.Get("/app.css",[&](const auto&,auto& r){r.set_content(css,"text/css");});server.Get("/app.js",[&](const auto&,auto& r){r.set_content(script,"text/javascript");});
-    server.Get("/api/bootstrap",[&](const auto&,auto& r){output(r,{{"token",token},{"version","0.1.0"},{"uiPort",port}});});
+    server.Get("/api/bootstrap",[&](const auto&,auto& r){output(r,{{"token",token},{"version","0.1.0"},{"uiPort",port},{"bodyLimit",bodyLimit()}});});
     server.Get("/api/state",[&](const auto& req,auto& r){json state;if(req.has_param("revision")&&req.get_param_value("revision")==std::to_string(store.revision()))state={{"unchanged",true},{"revision",store.revision()}};else state=store.snapshot();state["capture"]=capture.status();state["proxy"]=proxy.status();state["systemProxy"]=sysproxy.status();output(r,state);});
     server.Get("/api/interfaces",[&](const auto&,auto& r){output(r,capture.interfaces());});
     server.Get(R"(/api/flows/(\d+))",[&](const auto& req,auto& r){auto f=store.flow(idOf(req));if(f.is_null())r.status=404;output(r,f);});
