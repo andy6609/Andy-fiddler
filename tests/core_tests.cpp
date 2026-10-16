@@ -235,12 +235,14 @@ void exports() {
     CHECK(html.find("/*viewer*/") != std::string::npos);
 
 #ifdef WIRESCOPE_SOURCE_DIR
-    // The viewer script is inlined into reports; these sequences would end or corrupt the script element.
-    std::ifstream js(std::string(WIRESCOPE_SOURCE_DIR) + "/web/app.js", std::ios::binary);
-    std::string script((std::istreambuf_iterator<char>(js)), {});
-    CHECK(!script.empty());
-    CHECK(lower(script).find("</script") == std::string::npos);
-    CHECK(script.find("<!--") == std::string::npos);
+    // Both viewer scripts are inlined into reports; these sequences would end or corrupt the script element.
+    for (const char* name : {"/web/app.js", "/web/provenance.js"}) {
+        std::ifstream js(std::string(WIRESCOPE_SOURCE_DIR) + name, std::ios::binary);
+        std::string script((std::istreambuf_iterator<char>(js)), {});
+        CHECK(!script.empty());
+        CHECK(lower(script).find("</script") == std::string::npos);
+        CHECK(script.find("<!--") == std::string::npos);
+    }
 #endif
 }
 
