@@ -7,6 +7,9 @@ Where the data comes from, so the demo never pretends to be something it isn't:
   - Requests: real requests sent with curl through WireScope's proxy to local test servers on
     127.0.0.1 (HTTP/1.1, HTTPS via the local CA, HTTP/2). No real AI service is involved; the
     "agent" request bodies are made up.
+  - Local files: three made-up files registered as snapshots (src/main.cpp, src/config.ts, a fake .env with a canary),
+    so the trace views have something to trace. A third agent turn carries src/config.ts the way file-reading
+    tools do (numbered lines); .env is never sent.
   - Packets: a hand-built pcap (a TCP conversation with out-of-order, retransmitted and missing
     segments, plus one DNS query). It is not linked to the requests above, because the demo is
     generated on a machine without packet-capture permission.
@@ -31,10 +34,26 @@ OUT = os.path.join(ROOT, "site", "demo.html")
 
 NOTES = (
     "Demo data. Requests: real requests sent with curl through WireScope to local test servers on 127.0.0.1 "
-    "(no real AI service; the agent-style bodies are made up). Packets: a hand-built pcap (TCP conversation with "
+    "(no real AI service; the agent-style bodies are made up). Local files: three made-up snapshots; the third agent "
+    "turn carries src/config.ts as numbered lines, .env is never sent. Packets: a hand-built pcap (TCP conversation with "
     "out-of-order, retransmitted and missing segments, plus a DNS query). Requests and packets are not linked here "
     "because the demo was recorded on a machine without capture permission."
 )
+
+DEMO_FILES = {
+    "src/main.cpp": "// Demo entry point (made up for the WireScope demo).\n#include <cstdio>\n\nstatic int run(int argc, char** argv);\n\n"
+                    "int main(int argc, char** argv) {\n    return run(argc, argv);\n}\n\nstatic int run(int argc, char** argv) {\n"
+                    "    std::printf(\"demo with %d arguments\\n\", argc - 1);\n    return 0;\n}\n",
+    "src/config.ts": "// Demo client settings. WSCANARY-demo-config-7c1e\nexport const apiBase = \"https://api.demo.invalid\";\n"
+                     "export const timeoutMs = 15000;\nexport const retries = 3;\n\nexport function clientOptions() {\n"
+                     "  return { baseUrl: apiBase, timeout: timeoutMs, retries };\n}\n",
+    ".env": "# Fake value for the demo. Never real.\nDEMO_API_KEY=WSCANARY-demo-env-2b9d\n",
+}
+
+
+def numbered(text):
+    return "\n".join(f"{n:>6}→{line}" for n, line in enumerate(text.split("\n"), 1))
+
 
 AGENT_TURN_1 = {
     "model": "demo-model",
@@ -52,6 +71,16 @@ AGENT_TURN_2 = {
                                       "content": "int main(int argc, char** argv) {\n    return run(argc, argv);\n}\n"}]},
     ],
     "metadata": {"session_id": "demo-session-2"},
+}
+AGENT_TURN_3 = {
+    "model": "demo-model",
+    "stream": True,
+    "messages": [
+        {"role": "user", "content": "Raise the timeout in src/config.ts."},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "call_2", "name": "read_file", "input": {"path": "src/config.ts"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_2", "content": numbered(DEMO_FILES["src/config.ts"])}]},
+    ],
+    "metadata": {"session_id": "demo-session-3"},
 }
 
 
@@ -115,7 +144,7 @@ def main():
         engine.request("POST", "/api/proxy/start", {"port": proxy, "mitm": True})
         ca = f"{tmp}/data/root-ca.pem"
 
-        for turn in (AGENT_TURN_1, AGENT_TURN_2):
+        for turn in (AGENT_TURN_1, AGENT_TURN_2, AGENT_TURN_3):
             it.curl("-H", "Content-Type: application/json", "-d", json.dumps(turn), f"http://127.0.0.1:{h1}/demo/agent-turn", proxy=proxy)
         it.curl(f"http://127.0.0.1:{h1}/sse", proxy=proxy)
         it.curl("--compressed", f"http://127.0.0.1:{h1}/gzip", proxy=proxy)
@@ -123,9 +152,11 @@ def main():
         it.curl(f"http://127.0.0.1:{h1}/big", "-o", os.devnull, proxy=proxy)
         it.curl("--http2", "--cacert", ca, "-Z", *[f"https://localhost:{h2}/{n}" for n in ("models.json", "usage.json", "status.json")], proxy=proxy)
         it.curl(f"http://127.0.0.1:{it.free_port()}/refused", proxy=proxy)
-        it.wait_settled(engine, 11)
+        it.wait_settled(engine, 12)
+        for name, text in DEMO_FILES.items():
+            engine.request("POST", "/api/files", {"name": name, "base64": base64.b64encode(text.encode()).decode(), "origin": "api"})
         engine.request("POST", "/api/session", {"name": "WireScope demo", "client": "curl → local test servers",
-                                                "action": "agent-style requests, SSE, gzip, chunked, 1.5 MiB body, HTTP/2 ×3, refused upstream",
+                                                "action": "agent-style requests (one carries src/config.ts), SSE, gzip, chunked, 1.5 MiB body, HTTP/2 ×3, refused upstream",
                                                 "notes": NOTES})
         engine.request("POST", "/api/proxy/stop", {})
         _, flows_archive = engine.request("GET", "/api/session/download", raw=True)
@@ -148,7 +179,7 @@ def main():
         with open(OUT, "w", encoding="utf-8") as f:
             f.write(html)
         archive = json.loads(base64.b64decode(html.split("atob('")[1].split("')")[0]))
-        print(f"{OUT}: {len(archive['flows'])} requests, {len(archive['packets'])} packets, {len(html) // 1024} KiB")
+        print(f"{OUT}: {len(archive['flows'])} requests, {len(archive['packets'])} packets, {len(archive.get('localFiles', []))} local files, {len(html) // 1024} KiB")
     finally:
         for p in procs:
             p.terminate()
