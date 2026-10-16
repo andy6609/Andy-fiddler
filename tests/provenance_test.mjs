@@ -250,6 +250,33 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(P.byteRuns(file, bview(92, Buffer.alloc(30000, 1))).length === 0, 'unrelated bytes do not match');
 }
 
+// --- analyze(): one archive end to end ------------------------------------------------
+{
+  const config = 'export const apiBase = "https://api.internal.test";\nexport const retries = 3; // WSCANARY-cfg-q9\nexport const timeoutMs = 15000;\n';
+  const readme = '# Sandbox\nThis repository exists only for the egress experiment.\nNothing here is real.\n';
+  const archive = {
+    bodyLimit: 1048576,
+    localFiles: [
+      { id: 1, name: 'src/config.ts', base64: b64(config) },
+      { id: 2, name: 'README.md', base64: b64(readme) },
+    ],
+    flows: [
+      flow(100, { req: JSON.stringify({ messages: [{ role: 'user', content: [{ type: 'tool_result', content: config.split('\n').map((l, i) => `${String(i + 1).padStart(6)}→${l}`).join('\n') }] }] }) }),
+      flow(101, { req: `plain upload of the readme:\n${readme}`, reqHeaders: [['Content-Type', 'text/plain']] }),
+      flow(102, { res: gzipSync(JSON.stringify({ summary: 'export const retries = 3; // WSCANARY-cfg-q9' })), resHeaders: [['Content-Encoding', 'gzip']] }),
+    ],
+  };
+  const r = await P.analyze(archive);
+  const cfgMatch = r.matches.find((m) => m.fileName === 'src/config.ts' && m.flowId === 100);
+  check(cfgMatch && cfgMatch.fileFrom === 1 && cfgMatch.fileTo === 3 && cfgMatch.locator === '$.messages[0].content[0].content', 'config lines traced to the tool_result string');
+  check(cfgMatch && cfgMatch.transforms.join() === 'json,line-numbers', 'transforms explain how it matched');
+  check(r.matches.some((m) => m.fileName === 'README.md' && m.flowId === 101 && m.locator === 'body'), 'plain-text body matches in the raw view');
+  check(!r.matches.some((m) => m.flowId === 100 && m.locator === 'body'), 'no duplicate match from the escaped raw body');
+  check(r.canaries.sightings.filter((x) => x.token === 'WSCANARY-cfg-q9').map((x) => x.flowId).join() === '100,102', 'canary seen in the request and echoed in a gzip response');
+  check(r.coverage.find((c) => c.fileName === 'src/config.ts').ratio === 1, 'whole config covered');
+  check(r.files.length === 2 && r.bodyLimit === 1048576 && r.viewCount > 3, 'summary fields present');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);

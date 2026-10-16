@@ -367,28 +367,46 @@
   // Find runs of consecutive file lines that appear as consecutive lines of a view.
   // A run counts if it has at least `minAnchors` non-trivial lines, or one non-trivial line of `longLine`+ chars.
   // Runs are extended diagonally (file line i, view line j) -> (i+1, j+1); each file line keeps its 1-based number.
+  const fileIndexes = new WeakMap();
+  function fileIndex(file) {
+    let idx = fileIndexes.get(file);
+    if (!idx) {
+      idx = new Map();
+      file.text.split('\n').map(norm).forEach((l, i) => { if (!idx.has(l)) idx.set(l, []); idx.get(l).push(i); });
+      fileIndexes.set(file, idx);
+    }
+    return idx;
+  }
+  const viewLineCache = new WeakMap();
+  function viewLines(view) {
+    let v = viewLineCache.get(view);
+    if (!v) {
+      const { lines, stripped } = splitLines(view.text);
+      v = { lines: lines.map(norm), stripped };
+      viewLineCache.set(view, v);
+    }
+    return v;
+  }
+
   function lineRuns(file, view, { minAnchors = 2, longLine = 40 } = {}) {
-    const fileLines = file.text.split('\n').map(norm);
-    const index = new Map();
-    fileLines.forEach((l, i) => { if (!index.has(l)) index.set(l, []); index.get(l).push(i); });
-    const { lines, stripped } = splitLines(view.text);
-    const viewLines = lines.map(norm);
+    const index = fileIndex(file);
+    const { lines: vlines, stripped } = viewLines(view);
     const runs = [];
     let prev = new Map();                               // file index -> run ending at (i, j-1)
     const close = (run) => {
       const ok = run.anchors >= minAnchors || (run.anchors >= 1 && run.longest >= longLine);
       if (ok) runs.push(run);
     };
-    for (let j = 0; j < viewLines.length; j++) {
-      const line = viewLines[j];
+    for (let j = 0; j < vlines.length; j++) {
+      const line = vlines[j];
       const cur = new Map();
       const trivial = !line || isTrivial(line);
       for (const i of index.get(line) || []) {
         const before = prev.get(i - 1);
         if (!before && trivial) continue;               // trivial lines only extend
         const run = before ? { ...before } : { fileFrom: i, viewFrom: j, anchors: 0, longest: 0 };
-        run.fileTo = i;
-        run.viewTo = j;
+        // a run starts on a meaningful line (trivial ones cannot start it); trailing blank lines are not claimed
+        if (line) { run.fileTo = i; run.viewTo = j; }
         if (!trivial) { run.anchors++; run.longest = Math.max(run.longest, line.length); }
         cur.set(i, run);
       }
@@ -443,5 +461,44 @@
     return { fileId: file.id, fileName: file.name, lines: fileLines.length, anchorLines: anchors.length, matchedAnchors: matched, ratio: anchors.length ? matched / anchors.length : 0, ranges };
   }
 
-  return { byteRuns, lineRuns, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  // ---------------------------------------------------------------------------
+  // Everything for one archive
+  // ---------------------------------------------------------------------------
+
+  async function analyze(archive, { localFiles } = {}) {
+    const { views, notes } = await archiveViews(archive);
+    const files = prepareFiles(localFiles || archive.localFiles);
+    // only run line matching for files that share at least one non-trivial line with the view
+    const owners = new Map();
+    for (const f of files) if (!f.binary) for (const [line] of fileIndex(f)) if (line && !isTrivial(line)) { if (!owners.has(line)) owners.set(line, new Set()); owners.get(line).add(f); }
+    let matches = [];
+    for (const v of views) {
+      if (v.binary) { for (const f of files) if (f.binary) matches.push(...byteRuns(f, v)); continue; }
+      const candidates = new Set();
+      for (const line of viewLines(v).lines) for (const f of owners.get(line) || []) candidates.add(f);
+      for (const f of candidates) matches.push(...lineRuns(f, v));
+    }
+    // the same lines found in the raw body and in a decoded view of that body: keep the decoded one
+    const key = (m) => `${m.fileId}/${m.flowId}/${m.side}/${m.fileFrom}/${m.fileTo}`;
+    const derived = new Set(matches.filter((m) => m.locator !== 'body').map(key));
+    matches = matches.filter((m) => m.locator !== 'body' || !derived.has(key(m)));
+    matches.sort((a, b) => a.flowId - b.flowId || a.fileId - b.fileId || a.fileFrom - b.fileFrom);
+    const coverageList = files.map((f) => {
+      if (!f.binary) return coverage(f, matches);
+      const best = matches.filter((m) => m.fileId === f.id).reduce((n, m) => Math.max(n, m.bytes), 0);
+      return { fileId: f.id, fileName: f.name, binary: true, size: f.size, matchedBytes: best, ratio: f.size ? best / f.size : 0, ranges: best ? [[0, best]] : [] };
+    });
+    return {
+      files: files.map((f) => ({ id: f.id, name: f.name, size: f.size, binary: f.binary })),
+      viewCount: views.length,
+      matches,
+      canaries: findCanaries(files, views),
+      coverage: coverageList,
+      notes,
+      bodyLimit: archive.bodyLimit || null,
+      views,
+    };
+  }
+
+  return { analyze, byteRuns, lineRuns, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });
