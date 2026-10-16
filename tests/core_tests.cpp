@@ -185,6 +185,38 @@ void sessions() {
     CHECK(throws([&] { copy.restore(json{{"format", "other"}}); }));
 }
 
+void localFiles() {
+    Store s;
+    std::string bin("\x00\x01secret\xff", 10);
+    auto a = s.addLocalFile("src/config.ts", "export const KEY = 'WSCANARY-config-1';\n", "api");
+    auto b = s.addLocalFile("data/blob.bin", bin, "browser");
+    CHECK(a == 1 && b == 2);
+    auto snap = s.snapshot();
+    CHECK_EQ(snap["localFiles"].size(), size_t(2));
+    CHECK(!snap["localFiles"][0].contains("base64"));                    // list without content
+    CHECK_EQ(snap["localFiles"][0]["sha256"].get<std::string>(), sha256("export const KEY = 'WSCANARY-config-1';\n"));
+    CHECK_EQ(unbase64(s.localFile(b)["base64"].get<std::string>()), bin);  // binary survives
+    CHECK(throws([&] { s.addLocalFile("", "x", "api"); }));
+    CHECK(throws([&] { s.addLocalFile("big", std::string(LOCAL_FILE_LIMIT + 1, 'z'), "api"); }));
+
+    auto archive = s.archive();
+    CHECK_EQ(archive["localFiles"].size(), size_t(2));
+    Store copy; copy.restore(archive);
+    CHECK_EQ(unbase64(copy.localFile(2)["base64"].get<std::string>()), bin);
+    CHECK_EQ(copy.addLocalFile("next", "n", "api"), uint64_t(3));         // ids continue after restore
+    auto older = archive; older.erase("localFiles");                       // archives from before this feature
+    Store old; old.restore(older);
+    CHECK(old.snapshot()["localFiles"].empty());
+    auto broken = archive; broken["localFiles"][1]["id"] = 1;              // duplicate id
+    CHECK(throws([&] { copy.restore(broken); }));
+    CHECK(copy.localFile(3).is_object());                                  // failed import kept the session
+
+    CHECK(redactedArchive(archive)["localFiles"].empty());
+    CHECK(s.removeLocalFile(a) && !s.removeLocalFile(a));
+    s.clear("fresh");
+    CHECK(s.snapshot()["localFiles"].empty());
+}
+
 void exports() {
     Store s;
     auto id = s.createFlow({{"method", "POST"}, {"host", "api.example"}, {"path", "/v1/x?key=secret&</script><script>alert(1)</script>"}},
@@ -238,7 +270,7 @@ void processRecord() {
 int main() {
     for (auto& [name, fn] : std::vector<std::pair<const char*, void (*)()>>{
              {"encoding", encoding}, {"body limit", bodyLimit}, {"packets", packets}, {"capture files", captureFiles},
-             {"stream gaps", streamGaps}, {"sessions", sessions}, {"exports", exports}, {"process record", processRecord}}) {
+             {"stream gaps", streamGaps}, {"sessions", sessions}, {"local files", localFiles}, {"exports", exports}, {"process record", processRecord}}) {
         try { fn(); } catch (const std::exception& e) { ++failures; std::cerr << name << ": unexpected exception: " << e.what() << "\n"; }
     }
     std::cout << checks << " checks, " << failures << " failures\n";
