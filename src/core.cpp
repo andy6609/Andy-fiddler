@@ -27,7 +27,11 @@ std::string randomHex(size_t n) { std::string s(n,'\0'); if(RAND_bytes(reinterpr
 std::string safeJson(const json& j) { return j.dump(-1,' ',false,json::error_handler_t::replace); }
 std::string connectionKey(std::string a,std::string b) { if(a>b) std::swap(a,b); return a+" | "+b; }
 std::string endpoint(const std::string& a,uint16_t p) { return (a.find(':')!=std::string::npos?"["+a+"]":a)+":"+std::to_string(p); }
-void Body::append(const char* p,size_t n) { total+=n; if(bytes.size()<BODY_LIMIT) bytes.append(p,std::min(n,BODY_LIMIT-bytes.size())); }
+namespace { std::atomic<size_t> g_bodyLimit{DEFAULT_BODY_LIMIT}; }
+size_t bodyLimit() { return g_bodyLimit.load(); }
+void setBodyLimit(size_t bytes) { if(bytes<1024||bytes>MAX_BODY_LIMIT) throw std::runtime_error("Body limit must be 1 KiB – 32 MiB"); g_bodyLimit=bytes; }
+// The limit is read at append time, so a flow keeps whatever it captured before a change.
+void Body::append(const char* p,size_t n) { total+=n; size_t limit=bodyLimit(); if(bytes.size()<limit) bytes.append(p,std::min(n,limit-bytes.size())); }
 json Body::serialize() const { return {{"base64",base64(bytes)},{"captured",bytes.size()},{"total",total},{"truncated",total>bytes.size()},{"sha256",total==bytes.size()?sha256(bytes):""}}; }
 json Flow::summary() const { json j=meta;
     // The polled list only needs who sent it; path/commandLine/parent stay in detail().
@@ -68,7 +72,7 @@ void Store::restore(const json& j) {
         Flow f; f.meta=x; uint64_t id=x.at("id").get<uint64_t>(); if(!id || id>1000000000 || fs.count(id)) throw std::runtime_error("Invalid flow ID");
         f.meta.erase("request"); f.meta.erase("response"); f.meta.erase("timeline"); f.meta.erase("messages"); f.meta.erase("notes");
         f.requestHeaders=x.at("request").at("headers").get<Headers>(); f.responseHeaders=x.at("response").at("headers").get<Headers>();
-        for(auto pair:{std::pair<Body*,const json*>{&f.request,&x.at("request").at("body")},{&f.response,&x.at("response").at("body")}}) { auto& b=*pair.first; b.bytes=unbase64(pair.second->at("base64").get<std::string>()); b.total=pair.second->at("total").get<uint64_t>(); if(b.bytes.size()>BODY_LIMIT || b.total<b.bytes.size()) throw std::runtime_error("Invalid captured body"); bs+=b.bytes.size(); }
+        for(auto pair:{std::pair<Body*,const json*>{&f.request,&x.at("request").at("body")},{&f.response,&x.at("response").at("body")}}) { auto& b=*pair.first; b.bytes=unbase64(pair.second->at("base64").get<std::string>()); b.total=pair.second->at("total").get<uint64_t>(); if(b.bytes.size()>MAX_BODY_LIMIT || b.total<b.bytes.size()) throw std::runtime_error("Invalid captured body"); bs+=b.bytes.size(); }
         f.timeline=x.value("timeline",json::array()); f.messages=x.value("messages",json::array()); f.notes=x.value("notes","");
         if(f.meta.value("state","")=="pending" || f.meta.value("state","")=="streaming") f.meta["state"]="interrupted";
         nf=std::max(nf,id+1); fs[id]=std::move(f);

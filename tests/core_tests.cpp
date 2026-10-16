@@ -52,10 +52,10 @@ void encoding() {
 }
 
 void bodyLimit() {
-    Body b; std::string chunk(BODY_LIMIT / 2 + 1, 'x');
+    Body b; std::string chunk(DEFAULT_BODY_LIMIT / 2 + 1, 'x');
     b.append(chunk.data(), chunk.size()); b.append(chunk.data(), chunk.size()); b.append(chunk.data(), chunk.size());
     auto j = b.serialize();
-    CHECK_EQ(j["captured"].get<size_t>(), BODY_LIMIT);
+    CHECK_EQ(j["captured"].get<size_t>(), DEFAULT_BODY_LIMIT);
     CHECK_EQ(j["total"].get<uint64_t>(), uint64_t(chunk.size() * 3));
     CHECK(j["truncated"].get<bool>());
     CHECK_EQ(j["sha256"].get<std::string>(), ""s); // never claim a whole-body hash over a prefix

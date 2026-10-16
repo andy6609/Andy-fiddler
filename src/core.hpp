@@ -14,7 +14,13 @@
 namespace ws {
 using json = nlohmann::json;
 using Headers = std::vector<std::pair<std::string, std::string>>;
-constexpr size_t BODY_LIMIT = 1024 * 1024;
+// Per-direction body capture limit. 1 MiB by default; experiments can raise it with --body-limit.
+constexpr size_t DEFAULT_BODY_LIMIT = 1024 * 1024;
+constexpr size_t MAX_BODY_LIMIT = 32 * 1024 * 1024;
+// The TCP stream preview has its own fixed window, independent of the body limit.
+constexpr size_t STREAM_PREVIEW_LIMIT = 1024 * 1024;
+size_t bodyLimit();
+void setBodyLimit(size_t bytes);
 constexpr size_t MEMORY_LIMIT = 128 * 1024 * 1024;
 int64_t nowMs();
 std::string lower(std::string s);
