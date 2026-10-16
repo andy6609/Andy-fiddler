@@ -4,6 +4,8 @@
 
 WireScope is a traffic inspector I'm building in C++17. You pick a request the proxy recorded, and from there you can keep going down: the TCP connection it used, the IP packets that made up that connection, and the exact byte offset of every header field.
 
+**[Try the demo in your browser →](https://andy-fiddler.vercel.app)** No install needed. It's an offline report with local test data. The site can't see your own traffic; WireScope does that on your machine.
+
 ![Request inspector](docs/images/inspector-request.png)
 
 ## Why this exists
