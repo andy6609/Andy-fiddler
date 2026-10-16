@@ -478,10 +478,13 @@
       for (const line of viewLines(v).lines) for (const f of owners.get(line) || []) candidates.add(f);
       for (const f of candidates) matches.push(...lineRuns(f, v));
     }
-    // the same lines found in the raw body and in a decoded view of that body: keep the decoded one
+    // The same file lines in one body are often visible in several views (raw body, joined stream, the event itself).
+    // Keep one per body and file range: the most specific location wins (a concrete path, then a join, then the raw body).
+    const specificity = (m) => (m.locator === 'body' ? 2 : m.transforms.includes('join') ? 1 : 0);
     const key = (m) => `${m.fileId}/${m.flowId}/${m.side}/${m.fileFrom}/${m.fileTo}`;
-    const derived = new Set(matches.filter((m) => m.locator !== 'body').map(key));
-    matches = matches.filter((m) => m.locator !== 'body' || !derived.has(key(m)));
+    const best = new Map();
+    for (const m of matches) { const k = key(m); if (!best.has(k) || specificity(m) < specificity(best.get(k))) best.set(k, m); }
+    matches = [...best.values()];
     matches.sort((a, b) => a.flowId - b.flowId || a.fileId - b.fileId || a.fileFrom - b.fileFrom);
     const coverageList = files.map((f) => {
       if (!f.binary) return coverage(f, matches);

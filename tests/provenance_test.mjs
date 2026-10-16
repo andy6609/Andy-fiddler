@@ -277,6 +277,16 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(r.files.length === 2 && r.bodyLimit === 1048576 && r.viewCount > 3, 'summary fields present');
 }
 
+// --- one match per body and range ------------------------------------------------------
+{
+  const notes = 'Release notes for the sandbox repository go here.\nEach entry describes one observed behaviour change.\n';
+  const sse = ['Echo: ', 'Release notes for the sandbox repository go here.\n', 'Each entry describes one observed behaviour change.\n']
+    .map((t) => `data: ${JSON.stringify({ delta: { text: t } })}\n\n`).join('');
+  const r = await P.analyze({ localFiles: [{ id: 1, name: 'NOTES.md', base64: b64(notes) }], flows: [flow(110, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] });
+  const hits = r.matches.filter((m) => m.flowId === 110);
+  check(hits.length === 2 && hits.every((m) => !m.transforms.includes('join')), 'a range seen in an event and in the joined stream is reported once, at the event');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
