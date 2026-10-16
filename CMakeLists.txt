@@ -47,6 +47,11 @@ if(BUILD_TESTING)
   # End-to-end tests: real curl -> WireScope (or lab/) -> local HTTP/HTTPS/HTTP-2 servers.
   # HTTP/2 upstream: nghttpd when installed (macOS/Linux), otherwise tests/h2_server.py on the
   # Python 'h2' package (pip install h2) — the Windows path, since nghttpd has no Windows build.
+  # web/provenance.js is plain JavaScript; its tests run in node when node is installed.
+  find_program(NODE_EXECUTABLE node)
+  if(NODE_EXECUTABLE)
+    add_test(NAME provenance COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/provenance_test.mjs)
+  endif()
   find_package(Python3 COMPONENTS Interpreter)
   find_program(NGHTTPD_EXECUTABLE nghttpd HINTS /opt/homebrew/opt/nghttp2/bin /usr/local/opt/nghttp2/bin)
   find_program(CURL_EXECUTABLE curl)
