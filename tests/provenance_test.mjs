@@ -237,6 +237,19 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(JSON.stringify(cov.ranges) === '[[1,8]]', 'covered ranges are merged');
 }
 
+// --- binary files ---------------------------------------------------------------------
+{
+  const blob = Buffer.alloc(20000);
+  for (let i = 0; i < blob.length; i++) blob[i] = (i * 31 + 7) & 0xff;
+  const [file] = P.prepareFiles([{ id: 5, name: 'diagram.png', base64: blob.toString('base64') }]);
+  const bview = (id, bytes) => ({ flowId: id, side: 'request', locator: 'part[0] name="file"', transforms: ['multipart'], text: P.latin1(new Uint8Array(bytes)), binary: true });
+  const whole = P.byteRuns(file, bview(90, Buffer.concat([Buffer.from('xx'), blob, Buffer.from('yy')])));
+  check(whole.length === 1 && whole[0].whole && whole[0].viewOffset === 2, 'whole binary file found with its offset');
+  const cut = P.byteRuns(file, bview(91, blob.subarray(0, 9000)));
+  check(cut.length === 1 && !cut[0].whole && cut[0].bytes === 8192, 'cut upload: longest 4 KiB-step prefix is reported');
+  check(P.byteRuns(file, bview(92, Buffer.alloc(30000, 1))).length === 0, 'unrelated bytes do not match');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);

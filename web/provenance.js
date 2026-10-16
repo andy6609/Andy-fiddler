@@ -409,6 +409,25 @@
     }));
   }
 
+  // Binary files (images, office documents, archives) have no lines. Look for the exact bytes instead:
+  // the whole file, or else the longest prefix in 4 KiB steps (an upload cut by the capture limit keeps its start).
+  const PREFIX_STEP = 4096;
+  function byteRuns(file, view) {
+    if (!file.size || file.size < 16) return [];
+    const at = view.text.indexOf(file.text);
+    const base = { kind: 'bytes', fileId: file.id, fileName: file.name, flowId: view.flowId, side: view.side, locator: view.locator, transforms: view.transforms };
+    if (at >= 0) return [{ ...base, fileFrom: 0, fileTo: file.size, bytes: file.size, viewOffset: at, whole: true }];
+    let lo = 0, hi = Math.floor((file.size - 1) / PREFIX_STEP), found = -1, foundAt = -1;
+    while (lo <= hi) {                         // a shorter prefix is found whenever a longer one is: binary search works
+      const mid = (lo + hi) >> 1;
+      const len = Math.max(PREFIX_STEP, mid * PREFIX_STEP);
+      const pos = view.text.indexOf(file.text.slice(0, len));
+      if (pos >= 0) { found = len; foundAt = pos; lo = mid + 1; } else hi = mid - 1;
+    }
+    if (found < 0 || found > file.size) return [];
+    return [{ ...base, fileFrom: 0, fileTo: found, bytes: found, viewOffset: foundAt, whole: false }];
+  }
+
   // How much of each file showed up anywhere: union of matched line ranges over non-trivial lines.
   function coverage(file, matches) {
     const fileLines = file.text.split('\n').map(norm);
@@ -424,5 +443,5 @@
     return { fileId: file.id, fileName: file.name, lines: fileLines.length, anchorLines: anchors.length, matchedAnchors: matched, ratio: anchors.length ? matched / anchors.length : 0, ranges };
   }
 
-  return { lineRuns, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  return { byteRuns, lineRuns, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });
