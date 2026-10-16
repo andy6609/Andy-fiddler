@@ -1,6 +1,6 @@
-# WireScope — Windows 버전 (`windows` 브랜치)
+# WireScope — Windows 버전
 
-작성: 2026-10-15. main(macOS 개발 호스트에서만 검증된 상태)에서 갈라져 Windows 에서 빌드·실행·검증되도록 만든 브랜치다.
+작성: 2026-10-15. main(macOS 개발 호스트에서만 검증된 상태)에서 `windows` 브랜치로 갈라져 Windows 에서 빌드·실행·검증되도록 만들었고, 2026-10-16 main 에 합쳤다.
 
 > **한 줄 상태**: GitHub Actions `windows-latest` 러너(Windows Server 2025, MSVC)에서 /W4 경고 0 으로 빌드되고,
 > core · integration · windows · lab 테스트를 실제 Windows 위에서 돌린 결과가 아래 3절이다.
@@ -172,4 +172,4 @@ capture: available=False interfaces=0 error='Npcap is not installed. Install Npc
 1. 실제 Windows 데스크톱에서: Npcap(loopback) 캡처 → 같은 요청의 패킷 탭, 인증서 Install/Remove, Edge + 시스템 프록시.
 2. 같은 작업을 Claude Code / Codex CLI / Gemini CLI / 데스크톱 앱으로 실행하고 Process 열 + 비교 화면으로 정리 (인수인계 9절 4번).
 3. 캡처한 패킷에도 프로세스를 붙이기 (UDP 는 `GetExtendedUdpTable`, 짧은 연결은 ETW 가 필요할 수 있음).
-4. 이 브랜치를 main 에 합칠 때: README 3줄(C++20/17) 충돌은 `windows` 쪽을 택한다.
+4. ~~이 브랜치를 main 에 합칠 때: README 3줄(C++20/17) 충돌은 `windows` 쪽을 택한다.~~ 2026-10-16 그렇게 합쳤다.

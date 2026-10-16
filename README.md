@@ -84,7 +84,7 @@ The full breakdown is in [docs/COVERAGE.md](docs/COVERAGE.md) (in Korean for now
 - **Notes and comparisons**: structural JSON diff, plus session metadata (which client, what you did) and per-request notes, so experiments stay reproducible.
 - **Export** to a `.wscope` session, `.pcapng`, or a single-file HTML report. The report carries the viewer with it, so it works offline, and it has an optional pattern-based redaction mode.
 - **The local API isn't left wide open**: per-run token, Host check (DNS rebinding), Origin check (cross-site requests), CSP.
-- **Windows only** (`windows` branch): each request shows which process opened the proxy connection (PID, exe, command line, parent), read from the Windows TCP table the moment the connection is accepted. An opt-in **Use as system proxy** switch points WinINET at the proxy and puts your old setting back afterwards. Details in [docs/WINDOWS.md](docs/WINDOWS.md).
+- **Windows only**: each request shows which process opened the proxy connection (PID, exe, command line, parent), read from the Windows TCP table the moment the connection is accepted. An opt-in **Use as system proxy** switch points WinINET at the proxy and puts your old setting back afterwards. Details in [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ### Rules I try to stick to
 
@@ -116,7 +116,7 @@ To point a client at the proxy (proxy env vars, `NODE_EXTRA_CA_CERTS`, curl `--c
 
 ## Where it stands
 
-Windows is the real target. On the `windows` branch it builds with MSVC and the whole test suite runs on a GitHub Actions Windows runner. Nobody has run it on a Windows desktop yet.
+Windows is the real target. It builds with MSVC and the whole test suite runs on a GitHub Actions Windows runner. Nobody has run it on a Windows desktop yet.
 
 | | |
 |---|---|
