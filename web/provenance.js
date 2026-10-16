@@ -52,6 +52,31 @@
     return '';
   }
 
+  // Content-Encoding: gzip/deflate through DecompressionStream (browsers and node 18+).
+  // A truncated body still yields what decoded before the stream ended; the error is returned too.
+  const DECODERS = { gzip: 'gzip', 'x-gzip': 'gzip', deflate: 'deflate' };
+  async function decompress(bytes, encoding) {
+    const ds = new DecompressionStream(DECODERS[encoding]);
+    const writer = ds.writable.getWriter();
+    writer.write(bytes).catch(() => {});
+    writer.close().catch(() => {});
+    const reader = ds.readable.getReader();
+    const parts = [];
+    let total = 0, error = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        total += value.length;
+      }
+    } catch (e) { error = e.message || String(e); }
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return { bytes: out, error };
+  }
+
   // ---------------------------------------------------------------------------
   // Views of one body
   // ---------------------------------------------------------------------------
@@ -68,8 +93,22 @@
     const bytes = b64ToBytes(body.base64);
     if (!bytes.length) return [];
     if (body.truncated) notes.push({ flowId: flow.id, side, note: `only the first ${body.captured} of ${body.total} bytes were captured` });
+    // Undo Content-Encoding first; everything below works on the decoded bytes.
+    let base = bytes;
+    const transforms = [];
+    const encoding = headerValue(msg.headers, 'content-encoding').toLowerCase().trim();
+    if (encoding && encoding !== 'identity') {
+      if (DECODERS[encoding] && typeof DecompressionStream !== 'undefined') {
+        const d = await decompress(bytes, encoding);
+        if (d.error) notes.push({ flowId: flow.id, side, note: `${encoding} decoding stopped after ${d.bytes.length} bytes: ${d.error}` });
+        base = d.bytes;
+        transforms.push(encoding.replace('x-', ''));
+      } else {
+        notes.push({ flowId: flow.id, side, note: `content-encoding ${encoding} is not decoded; searched the encoded bytes` });
+      }
+    }
     const views = [];
-    if (isMostlyText(bytes)) views.push(makeView(flow, side, 'body', [], decodeText(bytes)));
+    if (isMostlyText(base)) views.push(makeView(flow, side, 'body', transforms, decodeText(base)));
     return views;
   }
 
@@ -82,5 +121,5 @@
     return { views, notes };
   }
 
-  return { b64ToBytes, decodeText, isMostlyText, headerValue, bodyViews, archiveViews };
+  return { b64ToBytes, decodeText, isMostlyText, headerValue, decompress, bodyViews, archiveViews };
 });

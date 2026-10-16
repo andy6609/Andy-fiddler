@@ -42,6 +42,28 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(views.length === 0 && notes[0].note.includes('redacted'), 'redacted body is reported');
 }
 
+// --- content-encoding ---------------------------------------------------------
+{
+  const text = 'line one\nline two WSCANARY-gz-1\n';
+  const { views } = await P.archiveViews({ flows: [
+    flow(10, { res: gzipSync(text), resHeaders: [['Content-Encoding', 'gzip']] }),
+    flow(11, { res: deflateSync(text), resHeaders: [['content-encoding', 'deflate']] }),
+  ] });
+  check(views.length === 2 && views.every((v) => v.text === text), 'gzip and deflate bodies are decoded');
+  check(views[0].transforms.join() === 'gzip' && views[1].transforms.join() === 'deflate', 'decoding is recorded as a transform');
+}
+{
+  const whole = gzipSync('A'.repeat(5000) + 'tail');
+  const { views, notes } = await P.archiveViews({ flows: [flow(12, { res: whole.subarray(0, whole.length - 8), resHeaders: [['Content-Encoding', 'gzip']], truncated: true })] });
+  check(views.length === 1 && views[0].text.startsWith('AAAA'), 'a cut gzip stream still yields the decoded prefix');
+  check(notes.some((n) => /gzip decoding stopped/.test(n.note)), 'the decoder error is reported');
+}
+{
+  const { views, notes } = await P.archiveViews({ flows: [flow(13, { res: 'not really brotli', resHeaders: [['Content-Encoding', 'br']] })] });
+  check(views.length === 1 && views[0].transforms.length === 0, 'unsupported encodings fall back to the bytes as captured');
+  check(notes.some((n) => /br is not decoded/.test(n.note)), 'unsupported encoding is reported');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
