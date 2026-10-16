@@ -2,6 +2,8 @@
 
 작성일: 2026-10-15, 같은 날 두 번째 세션에서 구현 상태를 갱신했다. 이 문서는 대화 맥락과 디스크 상태를 연결하는 시작점이다.
 
+> **추가 (2026-10-16, `feature/provenance` → main)**: 로컬 파일 → 요청 추적(provenance)을 넣었다. 사이드바 TRACE 아래 *Find in bodies* 와 *Local files → requests*, 판정은 `web/provenance.js`(브라우저·보고서·node 공용), 엔진에는 로컬 파일 스냅샷(`/api/files`)과 `--body-limit`. 실험 키트는 `experiments/001-agent-file-egress/`(가짜 에이전트 dry run 까지만, 실제 에이전트는 아직). 설계·한계: [PROVENANCE.md](PROVENANCE.md). 학습용 축소판: `lab/v11_provenance`.
+>
 > **현재 상태 (2026-10-15 두 번째 세션)**: 엔진, `web/app.js`, 테스트가 있다. macOS 개발 호스트에서 빌드, 단위 테스트, curl/nghttpd를 이용한 end-to-end 테스트, headless Chrome UI 조작까지 통과했다. **Windows 빌드, Npcap 실제 캡처, Windows 인증서 저장소, 실제 AI 서비스·에이전트 트래픽은 아직 검증하지 않았다.** 아래에서는 “구현됨”과 “검증됨”을 구분한다.
 
 > **`windows` 브랜치 (2026-10-15 세 번째 세션)**: 사용자 요청 "브랜치 하나 파서 윈도우 버전으로 또 만들어봐". MSVC + vcpkg 빌드, C++17, Windows 전용 기능(프록시 연결 → 프로세스 귀속, 시스템 프록시 켜기/복원), lab v9·v10, GitHub Actions Windows CI 를 추가했다. **Windows 검증은 GitHub Actions 러너(Windows Server 2025)에서 돌린 테스트 결과뿐이다.** 실제 Windows 데스크톱 실행, Npcap 캡처, 인증서 신뢰 설치는 여전히 미검증. 무엇이 확인됐고 무엇이 아닌지, Windows 에서만 다르게 동작한 곳 11개는 [WINDOWS.md](WINDOWS.md) 가 기준이다.
@@ -196,7 +198,8 @@ flow meta에 `port`가 추가되었고, HTTP/1 `protocol`은 실제 요청 버�
 1. 이 문서를 읽고 `git status`와 `ctest --test-dir build --output-on-failure`로 현재 상태를 확인한다. 이미 합의한 목표를 다시 묻지 않는다.
 2. ~~**Windows 빌드**~~: 완료 — windows 브랜치에서 작업해 2026-10-16 main 에 합침 (vcpkg manifest, MSVC `/W4` 경고 0, `pcap_stat` 헤더 대조). [WINDOWS.md](WINDOWS.md) 참고.
 3. **Windows 실제 검증**: 실제 데스크톱에서 Npcap 캡처(loopback 포함), CA 신뢰 설치·삭제(확인 대화상자), Edge + "Use as system proxy" 로 HTTPS·h2 관찰. 결과와 실패를 그대로 기록한다. (러너에서 확인한 범위는 WINDOWS.md 3절)
-4. **AI 클라이언트 실험**: 같은 작업(예: 파일 첨부 후 질문)을 여러 클라이언트로 실행하고 세션 메타데이터(클라이언트·버전·행동)를 남긴 뒤 비교 화면과 보고서로 정리한다. 서비스명만으로 일반화하지 않는다.
+4. **AI 클라이언트 실험 (키트 준비됨)**: `experiments/001-agent-file-egress/README.md` 절차대로 `make_sandbox.py` → `run_agent.py --label … --task … -- <에이전트 명령>` 을 에이전트마다 실행하고, `summary.txt`·`session.wscope` 를 비교한다. **실제 에이전트 실행은 사용자 계정으로 외부 서비스에 요청이 나가므로 사용자 확인 후에만.** 결과는 관찰로만 쓴다(한 번의 관찰을 "항상"으로 일반화하지 않음).
+4-1. provenance 다음 후보: 파일 I/O 추적(macOS `fs_usage`, Windows ETW/Process Monitor)을 시간·PID 로 provenance 결과와 맞추기 — "어느 프로세스가 읽었나"까지. 의미 유사도 판정은 판단 문장이 생기므로 하지 않기로 했다.
 5. `Store` 메모리 상한(4번), proxy authority 엣지 케이스 테스트, 학습용 코드 포맷 정리.
 6. CI: Windows 는 `.github/workflows/windows.yml` (MSVC 빌드 + 전체 ctest). macOS/Linux job 은 아직 없다. GitHub 로그는 로그인해야 받을 수 있어서 결과는 annotation 으로도 남긴다 (`.github/ci_annotate.py`).
 
