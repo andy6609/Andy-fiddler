@@ -146,6 +146,8 @@ capture: available=False interfaces=0 error='Npcap is not installed. Install Npc
 | 9 | MSVC /W4 경고 5개 | 멤버를 가리는 지역 이름, httplib 지역 변수와 겹치는 전역 이름, 상수 잘림 캐스트 | 이름 변경, 리터럴 | CI 에서 발견 → 0개 |
 | 10 | 테스트: HTTPS/HTTP2 확인 실패 | 러너의 curl(System32, Git)이 Schannel 전용 — HTTP/2 없음, 로컬 CA 폐기 확인 실패 | curl.se 공식 Windows 빌드 사용 | CI 에서 발견 (테스트 도구) |
 | 11 | 테스트: 한국어 로그 출력에서 `UnicodeEncodeError` | Windows 파이프의 Python stdout 은 ANSI(cp1252) | `sys.stdout.reconfigure(encoding="utf-8")` | CI 에서 발견 (테스트 도구) |
+| 12 | provenance CLI 가 아무것도 출력하지 않음 → 실험 dry run 이 JSON 파싱 오류로 멈춤 | `new URL(import.meta.url).pathname` 은 Windows 에서 `/D:/a/...` — 경로가 아니라서 `provenance.js` 를 못 읽음 | `createRequire` 의 상대 경로 `require('../web/provenance.js')` | CI 에서 발견 ([run 38879354808](https://github.com/andy6609/Andy-fiddler/actions/runs/38879354808), `f0aabba`) → 수정 후 통과 |
+| 13 | (12번을 고친 뒤, 출력에 `←` 나 한글이 있으면) `summary.txt`·stdout 에서 `UnicodeDecodeError` | Python 이 node 의 UTF-8 출력을 cp1252 로 읽고 씀. `←` 의 0x90, 한글 일부의 0x8D 등은 cp1252 에 없는 바이트 | `run_agent.py`·dry run 테스트에서 subprocess·파일·stdout 모두 UTF-8 명시, 테스트가 `→` 가 그대로인지 확인 | 예방 (12번에 가려 직접 보지 못함). macOS 에서 ISO-8859-1 로캘로 흉내 내면 latin-1 이 모든 바이트를 받아서 **통과해 버린다** — 흉내로는 못 잡는 종류 |
 
 ---
 
