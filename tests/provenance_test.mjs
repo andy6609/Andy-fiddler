@@ -31,7 +31,7 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
 }
 {
   const { views } = await P.archiveViews({ flows: [flow(2, { req: Buffer.from([0, 1, 2, 3, 0, 0, 255, 254]) })] });
-  check(views.length === 0, 'binary body produces no text view');
+  check(views.length === 1 && views[0].binary, 'binary body produces a binary view, not a text view');
 }
 {
   const { notes } = await P.archiveViews({ flows: [flow(3, { req: 'cut', truncated: true })] });
@@ -92,6 +92,24 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(views.some((v) => v.locator === 'events[1].delta.text' && v.text === 'int argc) {\n'), 'each event field is also its own view');
   check(views.some((v) => v.locator === 'events[4].data' && v.text === 'keepalive'), 'non-JSON event data is kept as text');
   check(views.some((v) => v.locator === 'events[*].delta.type (joined 4)' && v.text === 'text_delta'.repeat(4)), 'every repeated field gets a joined view, not only text');
+}
+
+// --- base64 and binary --------------------------------------------------------
+{
+  const doc = '# Notes\nWSCANARY-notes-3 lives here.\n'.repeat(4);
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 13]), Buffer.alloc(80, 7)]);
+  const body = JSON.stringify({ attachments: [{ name: 'notes.md', data: Buffer.from(doc).toString('base64') }, { image: `data:image/png;base64,${png.toString('base64')}` }], note: 'plain words that are not base64 at all, even if long enough to be considered' });
+  const { views } = await P.archiveViews({ flows: [flow(40, { req: body })] });
+  const text = views.find((v) => v.locator === '$.attachments[0].data' && v.transforms.join() === 'json,base64');
+  check(text && text.text === doc && !text.binary, 'base64 text inside JSON is decoded to a text view');
+  const bin = views.find((v) => v.locator === '$.attachments[1].image' && v.binary);
+  check(bin && bin.text === P.latin1(new Uint8Array(png)), 'data: URL images become binary views with the exact bytes');
+  check(!views.some((v) => v.locator === '$.note' && v.transforms.includes('base64')), 'ordinary long text is not mistaken for base64');
+}
+{
+  const raw = Buffer.from([1, 2, 3, 0, 0, 0, 200, 201, 202, 0, 5]);
+  const { views } = await P.archiveViews({ flows: [flow(41, { req: raw })] });
+  check(views.length === 1 && views[0].binary && views[0].text.length === raw.length, 'binary bodies become one binary view');
 }
 
 // --- end of sections ----------------------------------------------------------

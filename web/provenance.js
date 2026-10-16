@@ -143,9 +143,29 @@
     return views;
   }
 
-  // A view is { flowId, side, locator, transforms, text }. `notes` collects what could not be looked at.
-  function makeView(flow, side, locator, transforms, text) {
-    return { flowId: flow.id, side, locator, transforms, text };
+  // A view is { flowId, side, locator, transforms, text, binary }. `notes` collects what could not be looked at.
+  // Binary views carry the bytes as a latin1 string (one char per byte) so exact byte runs can be found with indexOf.
+  function makeView(flow, side, locator, transforms, text, binary = false) {
+    return { flowId: flow.id, side, locator, transforms, text, binary };
+  }
+  const latin1 = (bytes) => { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); return s; };
+  function bytesView(flow, side, locator, transforms, bytes) {
+    return isMostlyText(bytes) ? makeView(flow, side, locator, transforms, decodeText(bytes)) : makeView(flow, side, locator, transforms, latin1(bytes), true);
+  }
+
+  // Attachments often ride inside JSON as base64 (images, documents, "file_data" fields).
+  // Only long strings made purely of the base64 alphabet are tried, so ordinary text is left alone.
+  const BASE64_MIN = 64;
+  function base64Views(flow, side, transforms, strings) {
+    const out = [];
+    for (const [path, value] of strings) {
+      const v = value.startsWith('data:') && value.includes(';base64,') ? value.slice(value.indexOf(';base64,') + 8) : value;
+      if (v.length < BASE64_MIN || v.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(v)) continue;
+      let bytes;
+      try { bytes = b64ToBytes(v); } catch { continue; }
+      out.push(bytesView(flow, side, path, [...transforms, 'json', 'base64'], bytes));
+    }
+    return out;
   }
 
   async function bodyViews(flow, side, notes = []) {
@@ -170,12 +190,14 @@
       }
     }
     const views = [];
-    if (!isMostlyText(base)) return views;
+    if (!isMostlyText(base)) { views.push(makeView(flow, side, 'body', transforms, latin1(base), true)); return views; }
     const text = decodeText(base);
     views.push(makeView(flow, side, 'body', transforms, text));
     const parsed = tryJson(text);
     if (parsed.ok) {
-      for (const [path, value] of jsonStrings(parsed.value, '$', [])) views.push(makeView(flow, side, path, [...transforms, 'json'], value));
+      const strings = jsonStrings(parsed.value, '$', []);
+      for (const [path, value] of strings) views.push(makeView(flow, side, path, [...transforms, 'json'], value));
+      views.push(...base64Views(flow, side, transforms, strings));
     } else if (looksLikeSse(headerValue(msg.headers, 'content-type'), text)) {
       views.push(...sseViews(flow, side, transforms, text));
     }
@@ -191,5 +213,5 @@
     return { views, notes };
   }
 
-  return { b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, bodyViews, archiveViews };
+  return { b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });
