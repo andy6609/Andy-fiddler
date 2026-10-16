@@ -123,8 +123,8 @@ WireScope는 두 경로로 트래픽을 수집한다. **프록시 경로**는 �
 |---|---|---|
 | HTTP/1.1, chunked, 1.5 MiB body, TLS 종단·통과, HTTP/2 병렬 5 stream·trailer·POST, 오류 기록, `/api/files` | macOS에서 검증, Windows 러너(CI)에서 같은 테스트 | `tests/integration_test.py` (58개 검증 항목) |
 | 패킷 디코딩, pcap/pcapng, TCP 미리보기 gap, 세션 복원, 보고서 escape, 로컬 파일 스냅샷, body 한도 | macOS + Windows 러너 | `tests/core_tests.cpp` (128개 검증 항목) |
-| provenance 판정 (view·검색·canary·줄 run·fragment·바이트·중복 정리) | node 에서 검증 | `tests/provenance_test.mjs` (71개 검증 항목) |
-| 실험 키트 전체 (정답을 아는 가짜 에이전트) | macOS에서 검증 | `tests/experiment_dryrun_test.py` (14개 검증 항목) |
+| provenance 판정 (view·검색·canary·줄 run·fragment·바이트·중복 정리) | node 에서 검증 (macOS + Windows 러너) | `tests/provenance_test.mjs` (71개 검증 항목) |
+| 실험 키트 전체 (정답을 아는 가짜 에이전트) | macOS + Windows 러너 | `tests/experiment_dryrun_test.py` (14개 검증 항목) |
 | UI 화면 (목록, 상세, SSE, gzip, 비교, 패킷 hex, 오프라인 보고서) | headless Chrome으로 조작 확인 | 개발 중 스크린샷 |
 | 라이브 패킷 캡처 | **미검증** — macOS 개발 호스트에 BPF 권한 없음 | 합성 파일로만 확인 |
 | Windows 빌드 | GitHub Actions Windows 러너에서 MSVC 빌드 + 테스트 통과 | `.github/workflows/windows.yml` |
