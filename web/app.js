@@ -1500,7 +1500,9 @@
     renderTraceTable();
     const revision = S.revision;
     try {
-      T.analysis = await PROV.analyze(await traceArchive());
+      const archive = await traceArchive();
+      T.analysis = await PROV.analyze(archive);
+      T.files = new Map(PROV.prepareFiles(archive.localFiles).map((f) => [f.id, f]));
       T.analyzedRevision = revision;
       T.error = '';
       if (T.query) runSearch();
@@ -1714,7 +1716,85 @@
 
   function traceInspector(sel, item) {
     if (sel.kind === 'hit') return hitInspector(item);
-    return '';
+    if (sel.kind === 'canary') return canaryInspector(item);
+    return matchInspector(item);
+  }
+
+  // Each transform in plain words, so "how did this match" never needs guessing.
+  const TRANSFORM_TEXT = {
+    gzip: 'Content-Encoding gzip undone', deflate: 'Content-Encoding deflate undone', json: 'a JSON string value, unescaped',
+    sse: 'one server-sent event', join: 'the same field joined across events in order', base64: 'base64 decoded',
+    multipart: 'one multipart/form-data part', form: 'a urlencoded form field, percent-decoded', 'line-numbers': 'line-number prefixes removed (tool output)',
+  };
+  const transformList = (t) => (t.length ? t.map((x) => `<li><span class="badge">${esc(x)}</span> ${esc(TRANSFORM_TEXT[x] || '')}</li>`).join('') : '<li>bytes as captured, nothing undone</li>');
+  const findView = (m) => (S.trace.analysis?.views || []).find((v) => v.flowId === m.flowId && v.side === m.side && v.locator === m.locator);
+
+  // Numbered lines with a highlighted range and a little context on each side.
+  function linesBlock(text, from, to, { context = 2, unnumber = false } = {}) {
+    let lines = text.split('\n');
+    if (unnumber) lines = PROV.splitLines(text).lines;
+    const a = Math.max(1, from - context), b = Math.min(lines.length, to + context);
+    const rows = [];
+    for (let n = a; n <= b; n++) {
+      const inside = n >= from && n <= to;
+      rows.push(`<div class="trace-line${inside ? ' hit' : ''}"><span>${n}</span>${esc(lines[n - 1])}</div>`);
+    }
+    return `<div class="trace-lines">${rows.join('')}</div>`;
+  }
+  const hexOf = (str, max = 64) => Array.from(str.slice(0, max), (c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ') + (str.length > max ? ' …' : '');
+
+  function inspectorButtons(flowId, side) {
+    return `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+      <button class="primary" data-action="trace-open-flow" data-id="${flowId}" data-side="${side}">Open request #${flowId}</button>
+      <button data-action="trace-open-packets" data-id="${flowId}">Packets on its connection</button></div>
+      <p class="small muted" style="margin-top:14px">This shows the bytes were inside the captured ${esc(side)}. It does not show which process read the file, or that nothing else was sent.</p>`;
+  }
+
+  function matchInspector(m) {
+    const file = S.trace.files?.get(m.fileId);
+    const view = findView(m);
+    let fileBlock = '', viewBlock = '';
+    if (m.kind === 'bytes') {
+      fileBlock = `<pre class="code">${esc(hexOf(file ? file.text : ''))}</pre>`;
+      viewBlock = view ? `<pre class="code">${esc(hexOf(view.text.slice(m.viewOffset)))}</pre><p class="small muted">at byte offset ${m.viewOffset} of that view</p>` : '';
+    } else {
+      fileBlock = file ? linesBlock(file.text, m.fileFrom, m.fileTo) : '';
+      viewBlock = view ? linesBlock(view.text, m.viewFrom, m.viewTo, { unnumber: m.transforms.includes('line-numbers') }) : '';
+    }
+    return `
+      <div class="inspector-header">
+        <div class="inspector-title"><strong>${esc(m.fileName)} · ${esc(fileRange(m))}</strong></div>
+        <div class="inspector-url">→ request #${m.flowId} ${sideLabel(m.side)} · ${flowLabel(m.flowId)}</div>
+      </div>
+      <div class="inspector-content">
+        <dl class="kv">
+          <dt>kind</dt><dd>${esc(m.kind === 'bytes' ? 'exact bytes' : m.kind === 'fragment' ? 'long line quoted inside other text' : 'run of consecutive lines')}</dd>
+          <dt>where</dt><dd>${esc(m.locator)}</dd>
+        </dl>
+        <div class="section" style="margin-top:14px"><div class="section-title">How it matched</div><ul class="trace-how">${transformList(m.transforms)}</ul></div>
+        <div class="section"><div class="section-title"><span>In the local file</span><span class="muted mono">${esc(m.fileName)}</span></div>${fileBlock}</div>
+        <div class="section"><div class="section-title"><span>In the ${esc(m.side)}</span><span class="muted mono">${esc(m.locator)}</span></div>${viewBlock}</div>
+        ${inspectorButtons(m.flowId, m.side)}
+      </div>`;
+  }
+
+  function canaryInspector(x) {
+    const view = findView(x);
+    const context = view ? `<pre class="code">${esc(view.text.slice(Math.max(0, x.offset - 80), x.offset))}<mark>${esc(x.token)}</mark>${esc(view.text.slice(x.offset + x.token.length, x.offset + x.token.length + 80))}</pre>` : '';
+    return `
+      <div class="inspector-header">
+        <div class="inspector-title"><strong class="mono">${esc(x.token)}</strong></div>
+        <div class="inspector-url">→ request #${x.flowId} ${sideLabel(x.side)} · ${flowLabel(x.flowId)}</div>
+      </div>
+      <div class="inspector-content">
+        <dl class="kv">
+          <dt>planted in</dt><dd>${x.from.length ? x.from.map((f) => esc(`${f.fileName}${f.line ? `:${f.line}` : ''}`)).join('<br>') : 'no registered local file contains this token'}</dd>
+          <dt>where</dt><dd>${esc(x.locator)}</dd>
+        </dl>
+        <div class="section" style="margin-top:14px"><div class="section-title">How it was read</div><ul class="trace-how">${transformList(x.transforms)}</ul></div>
+        <div class="section"><div class="section-title">Context</div>${context}</div>
+        ${inspectorButtons(x.flowId, x.side)}
+      </div>`;
   }
 
   function hitInspector(h) {
