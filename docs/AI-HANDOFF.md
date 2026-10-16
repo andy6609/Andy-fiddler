@@ -97,7 +97,7 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 | 파일 | 내용 | 검증 |
 |---|---|---|
 | `CMakeLists.txt` | C++17, OpenSSL, nghttp2, Threads, Windows 링크, 비Windows libpcap, 매 빌드마다 웹 자산 복사, CTest(core + integration) | macOS 클린 빌드 경고 0 |
-| `src/core.hpp/.cpp` | Flow/Packet/Store, body 1 MiB 캡, base64/SHA256, 세션 저장·복원(검증 후 교체), redact, HTML 보고서, 합성 sample | 단위 테스트 |
+| `src/core.hpp/.cpp` | Flow/Packet/Store, body 캡(기본 1 MiB, `--body-limit` 최대 32 MiB), 로컬 파일 스냅샷(`LocalFile`, 2 MiB/32 MiB/256개), base64/SHA256, 세션 저장·복원(검증 후 교체, 예전 archive 호환), redact(스냅샷 제외), HTML 보고서, 합성 sample | 단위 테스트 |
 | `src/packet.hpp/.cpp` | Ethernet/VLAN/IP/TCP/UDP/DNS/TLS 필드와 offset, pcap/pcapng 읽기·쓰기, TCP preview | 단위 테스트(경계·잘림·DNS 포인터 루프·패딩) |
 | `src/capture.cpp` | Windows Npcap 동적 로드, 인터페이스/BPF/캡처 스레드/통계. `pcap_stat` 은 Npcap SDK 1.16 헤더대로 6필드 | macOS libpcap 경로는 인터페이스 목록만 확인(BPF 권한 없음). Windows 러너에선 "Npcap 미설치" 경로만. **라이브 캡처 미검증** |
 | `src/net.hpp` | socket/Channel/TLS/Proxy 인터페이스 | integration 테스트로 간접 검증 |
@@ -106,15 +106,18 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 | `src/http2.cpp` | 양방향 nghttp2 세션, 스트림 매핑, 터널 포트 기반 `:authority` 확인, 요청·응답 trailer 전달과 기록, 종료 조건 | integration 테스트(비443 포트, 5개 병렬 스트림, trailer, POST) |
 | `src/main.cpp` | 로컬 API, token/Host/Origin 검사, 정적 파일, CLI, Windows 브라우저 열기 | integration 테스트(403 경계 포함) |
 | `web/index.html`, `web/app.css` | 컨테이너, 밀도 높은 검사 도구 스타일 | Chrome 1440×900 스크린샷 |
-| `web/app.js` | 실시간/오프라인 공용 UI(아래 7절) | headless Chrome CDP 조작, JS 오류 0 |
+| `web/app.js` | 실시간/오프라인 공용 UI(아래 7절) + TRACE 화면(Find in bodies, Local files → requests, 파일 추가/삭제, 일치 inspector) | headless Chrome CDP 조작, JS 오류 0 |
+| `web/provenance.js` | body → view(gzip·JSON·SSE·join·base64·multipart·form), 검색, canary, 줄 run, fragment, 바이너리, 중복 정리, 커버리지. 브라우저·보고서·node 공용 | `tests/provenance_test.mjs` 71개 |
+| `scripts/provenance_cli.mjs` | `.wscope` 를 터미널에서 분석, `--files DIR`, `--json` | 실험 dry run 에서 사용 |
+| `experiments/001-agent-file-egress/` | 실험 절차, `make_sandbox.py`(canary 저장소), `run_agent.py`(에이전트 하나 기록), `fake_agent.py`(정답 아는 가짜) | `tests/experiment_dryrun_test.py` 10개. **실제 에이전트 미실행** |
 | `src/process.cpp` | accept 직후 `GetExtendedTcpTable` 로 연결 → PID, exe/경로/명령줄/부모 | Windows 러너: 직접 띄운 curl/python 의 PID·경로·명령줄·부모와 일치 |
 | `src/sysproxy.cpp` | WinINET 시스템 프록시 켜기/복원, 백업 파일, 비정상 종료 감지 | Windows 러너: 레지스트리 반영, 프록시 인자 없는 Python urllib 가 따라옴, 4가지 복원 경로 |
-| `tests/core_tests.cpp` | 소켓 없는 단위 테스트 (104개) | 통과 (macOS, Windows) |
-| `tests/integration_test.py` | curl → WireScope → 로컬 HTTP·HTTPS·nghttpd(h2) 서버, 46개 검사. nghttpd 가 없으면 `tests/h2_server.py` | 통과 (macOS, Windows) |
+| `tests/core_tests.cpp` | 소켓 없는 단위 테스트 (128개) | 통과 (macOS). Windows 러너는 provenance 머지 후 CI 결과로 확인 |
+| `tests/integration_test.py` | curl → WireScope → 로컬 HTTP·HTTPS·nghttpd(h2) 서버, 58개 검사(`/api/files`, provenance.js 인라인 포함). nghttpd 가 없으면 `tests/h2_server.py` | 통과 (macOS) |
 | `tests/windows_test.py` | 프로세스 귀속, 시스템 프록시(CI 에서만), 한글 `--data` 경로 | Windows 러너 |
 | `third_party/` | cpp-httplib, nlohmann/json 단일 헤더와 LICENSE | — |
 
-| `lab/` (v1~v8) + `docs/lab/` | 사용자 요청(2026-10-15)으로 local-proxy-lab 처럼 개념별 학습 버전을 한국어 주석으로 만듦. 본체와 코드 공유 없음 | `tests/lab_smoke.py` 86개 검사 통과, v6 라이브 캡처는 미검증 |
+| `lab/` (v1~v11) + `docs/lab/` | 사용자 요청(2026-10-15)으로 local-proxy-lab 처럼 개념별 학습 버전을 한국어 주석으로 만듦(v9·v10 은 Windows 세션, v11 은 provenance 축소판). 본체와 코드 공유 없음 | `tests/lab_smoke.py` macOS 94개 검사 통과, v6 라이브 캡처는 미검증 |
 
 **없는 것**: Windows 실제 캡처 증거, 실제 Windows 데스크톱에서의 실행 기록, 실제 AI 서비스/에이전트 실험 기록. (빌드 스크립트·vcpkg manifest·Windows CI 는 windows 브랜치에서 만들어 2026-10-16 main 에 합쳤다.)
 
