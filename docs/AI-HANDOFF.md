@@ -109,7 +109,7 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 | `web/app.js` | 실시간/오프라인 공용 UI(아래 7절) + TRACE 화면(Find in bodies, Local files → requests, 파일 추가/삭제, 일치 inspector) | headless Chrome CDP 조작, JS 오류 0 |
 | `web/provenance.js` | body → view(gzip·JSON·SSE·join·base64·multipart·form), 검색, canary, 줄 run, fragment, 바이너리, 중복 정리, 커버리지. 브라우저·보고서·node 공용 | `tests/provenance_test.mjs` 71개 |
 | `scripts/provenance_cli.mjs` | `.wscope` 를 터미널에서 분석, `--files DIR`, `--json` | 실험 dry run 에서 사용 |
-| `experiments/001-agent-file-egress/` | 실험 절차, `make_sandbox.py`(canary 저장소), `run_agent.py`(에이전트 하나 기록), `fake_agent.py`(정답 아는 가짜) | `tests/experiment_dryrun_test.py` 14개. **실제 에이전트 미실행** |
+| `experiments/001-agent-file-egress/` | 실험 절차, `make_sandbox.py`(canary 저장소), `run_agent.py`(에이전트 하나 기록), `fake_agent.py`(정답 아는 가짜) | `tests/experiment_dryrun_test.py` 14개. 실제 에이전트: Claude Code 2.1.275 1회 (`runs/`) |
 | `src/process.cpp` | accept 직후 `GetExtendedTcpTable` 로 연결 → PID, exe/경로/명령줄/부모 | Windows 러너: 직접 띄운 curl/python 의 PID·경로·명령줄·부모와 일치 |
 | `src/sysproxy.cpp` | WinINET 시스템 프록시 켜기/복원, 백업 파일, 비정상 종료 감지 | Windows 러너: 레지스트리 반영, 프록시 인자 없는 Python urllib 가 따라옴, 4가지 복원 경로 |
 | `tests/core_tests.cpp` | 소켓 없는 단위 테스트 (128개) | 통과 (macOS, Windows 러너 run 38881207226) |
@@ -119,7 +119,7 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 
 | `lab/` (v1~v11) + `docs/lab/` | 사용자 요청(2026-10-15)으로 local-proxy-lab 처럼 개념별 학습 버전을 한국어 주석으로 만듦(v9·v10 은 Windows 세션, v11 은 provenance 축소판). 본체와 코드 공유 없음 | `tests/lab_smoke.py` macOS 94개 검사 통과, v6 라이브 캡처는 미검증 |
 
-**없는 것**: Windows 실제 캡처 증거, 실제 Windows 데스크톱에서의 실행 기록, 실제 AI 서비스/에이전트 실험 기록. (빌드 스크립트·vcpkg manifest·Windows CI 는 windows 브랜치에서 만들어 2026-10-16 main 에 합쳤다.)
+**없는 것**: Windows 실제 캡처 증거, 실제 Windows 데스크톱에서의 실행 기록, Claude Code(macOS, 1회) 외의 AI 서비스/에이전트 실험 기록. (빌드 스크립트·vcpkg manifest·Windows CI 는 windows 브랜치에서 만들어 2026-10-16 main 에 합쳤다.)
 
 사용자 작업 스타일 참고: local-proxy-lab 처럼 버전을 나눠 쌓고, 한국어 주석(목적/핵심/흐름/이전 버전 대비 변화/함정/한계)을 두껍게 달고, 커밋을 작게 자주 나누는 것을 선호한다.
 
@@ -201,7 +201,7 @@ flow meta에 `port`가 추가되었고, HTTP/1 `protocol`은 실제 요청 버�
 1. 이 문서를 읽고 `git status`와 `ctest --test-dir build --output-on-failure`로 현재 상태를 확인한다. 이미 합의한 목표를 다시 묻지 않는다.
 2. ~~**Windows 빌드**~~: 완료 — windows 브랜치에서 작업해 2026-10-16 main 에 합침 (vcpkg manifest, MSVC `/W4` 경고 0, `pcap_stat` 헤더 대조). [WINDOWS.md](WINDOWS.md) 참고.
 3. **Windows 실제 검증**: 실제 데스크톱에서 Npcap 캡처(loopback 포함), CA 신뢰 설치·삭제(확인 대화상자), Edge + "Use as system proxy" 로 HTTPS·h2 관찰. 결과와 실패를 그대로 기록한다. (러너에서 확인한 범위는 WINDOWS.md 3절)
-4. **AI 클라이언트 실험 (키트 준비됨)**: `experiments/001-agent-file-egress/README.md` 절차대로 `make_sandbox.py` → `run_agent.py --label … --task … -- <에이전트 명령>` 을 에이전트마다 실행하고, `summary.txt`·`session.wscope` 를 비교한다. **실제 에이전트 실행은 사용자 계정으로 외부 서비스에 요청이 나가므로 사용자 확인 후에만.** 결과는 관찰로만 쓴다(한 번의 관찰을 "항상"으로 일반화하지 않음).
+4. **AI 클라이언트 실험 (Claude Code 2.1.275 1회 완료, 2026-10-16 — `experiments/001-agent-file-egress/runs/`)**: `experiments/001-agent-file-egress/README.md` 절차대로 `make_sandbox.py` → `run_agent.py --label … --task … -- <에이전트 명령>` 을 에이전트마다 실행하고, `summary.txt`·`session.wscope` 를 비교한다. **실제 에이전트 실행은 사용자 계정으로 외부 서비스에 요청이 나가므로 사용자 확인 후에만.** 결과는 관찰로만 쓴다(한 번의 관찰을 "항상"으로 일반화하지 않음).
 4-1. provenance 다음 후보: 파일 I/O 추적(macOS `fs_usage`, Windows ETW/Process Monitor)을 시간·PID 로 provenance 결과와 맞추기 — "어느 프로세스가 읽었나"까지. 의미 유사도 판정은 판단 문장이 생기므로 하지 않기로 했다.
 5. `Store` 메모리 상한(4번), proxy authority 엣지 케이스 테스트, 학습용 코드 포맷 정리.
 6. CI: Windows 는 `.github/workflows/windows.yml` (MSVC 빌드 + 전체 ctest). macOS/Linux job 은 아직 없다. GitHub 로그는 로그인해야 받을 수 있어서 결과는 annotation 으로도 남긴다 (`.github/ci_annotate.py`).

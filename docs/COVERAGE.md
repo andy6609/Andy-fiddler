@@ -129,7 +129,8 @@ WireScope는 두 경로로 트래픽을 수집한다. **프록시 경로**는 �
 | 라이브 패킷 캡처 | **미검증** — macOS 개발 호스트에 BPF 권한 없음 | 합성 파일로만 확인 |
 | Windows 빌드 | GitHub Actions Windows 러너에서 MSVC 빌드 + 테스트 통과 | `.github/workflows/windows.yml` |
 | Npcap, loopback 캡처, Windows 인증서 저장소, 실제 Windows 데스크톱 | **미검증** | 러너에 Npcap 드라이버 없음, 대화형 신뢰 확인창 |
-| 실제 브라우저·AI 클라이언트 트래픽, 실제 에이전트로 실험 001 | **미검증** | 로컬 테스트 서버와 가짜 에이전트만 사용 |
+| 실제 에이전트로 실험 001 | Claude Code 2.1.275 로 1회 (macOS, 2026-10-16) | [실행 1](../experiments/001-agent-file-egress/runs/2026-10-16-claude-code-2.1.275.md). 한 번의 관찰 |
+| 실제 브라우저 트래픽, 다른 AI 클라이언트, Windows 에서의 에이전트 | **미검증** | |
 | 브라우저의 프록시 설정 시 QUIC 미사용 여부 | **미검증** | §3의 일반적 동작 기술 |
 
 ---

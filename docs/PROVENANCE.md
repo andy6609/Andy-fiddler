@@ -120,7 +120,7 @@ WireScope 는 원래 요청에서 출발해 연결·패킷·바이트로 내려�
 | `tests/experiment_dryrun_test.py` | 정답을 아는 가짜 에이전트로 실험 키트 전체: 보낸 줄만 정확히, 안 보낸 canary 는 안 보임, 이전 턴 재전송도 보임 |
 | headless Chrome | Find in bodies, Local files → requests, inspector, 파일 추가/삭제, 오프라인·redacted 보고서 |
 
-**실제 에이전트(Claude Code, Codex 등)로는 아직 돌리지 않았다.**
+실제 에이전트는 Claude Code 2.1.275 로 한 번 돌렸다 ([실행 1](../experiments/001-agent-file-egress/runs/2026-10-16-claude-code-2.1.275.md)). 가짜 에이전트와 달리 이전 턴을 다시 보내지 않았고(`thread: continue`), 응답 SSE 의 도구 입력(`partial_json`)을 이어붙인 view 가 JSON 으로 다시 풀리지 않는 한계가 드러났다.
 
 ---
 

@@ -144,7 +144,7 @@ Windows is the real target. It builds with MSVC and the whole test suite runs on
 | Windows runner (Server 2025, MSVC `/W4` with 0 warnings): the same unit, end-to-end, provenance, experiment dry-run and lab tests, plus 35 Windows-only checks (process attribution against real PIDs, system proxy on/off/crash recovery, Korean `--data` path) | passing, 2026-10-16 — see [docs/WINDOWS.md](docs/WINDOWS.md) |
 | UI driven in headless Chrome: list, detail, SSE, gzip, compare, packet hex, offline report, process column, find in bodies, local files → requests, adding and removing files | no JS errors |
 | Npcap live capture, Windows certificate store install, a real Windows 10/11 desktop | **not verified yet** |
-| Real AI services and coding agents | **not done yet**. The kit for it is ready ([experiment 001](experiments/001-agent-file-egress)) |
+| Real coding agents | **one run**: Claude Code 2.1.275 on macOS ([results](experiments/001-agent-file-egress/runs/2026-10-16-claude-code-2.1.275.md)). Other agents, and anything on Windows, not yet |
 
 ## Finding your way around
 
