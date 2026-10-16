@@ -59,6 +59,16 @@ void bodyLimit() {
     CHECK_EQ(j["total"].get<uint64_t>(), uint64_t(chunk.size() * 3));
     CHECK(j["truncated"].get<bool>());
     CHECK_EQ(j["sha256"].get<std::string>(), ""s); // never claim a whole-body hash over a prefix
+    // A raised limit applies to bodies appended afterwards; invalid limits are refused.
+    setBodyLimit(4 * DEFAULT_BODY_LIMIT);
+    Body big; std::string two(2 * DEFAULT_BODY_LIMIT, 'y');
+    big.append(two.data(), two.size());
+    CHECK_EQ(big.serialize()["captured"].get<size_t>(), two.size());
+    CHECK(!big.serialize()["truncated"].get<bool>());
+    CHECK(throws([] { setBodyLimit(MAX_BODY_LIMIT + 1); }));
+    CHECK(throws([] { setBodyLimit(10); }));
+    CHECK_EQ(ws::bodyLimit(), 4 * DEFAULT_BODY_LIMIT);
+    setBodyLimit(DEFAULT_BODY_LIMIT);
     Body small; small.append("abc", 3);
     CHECK_EQ(small.serialize()["sha256"].get<std::string>(), sha256("abc"));
 }
