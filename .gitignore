@@ -11,3 +11,6 @@ __pycache__/
 
 # Private design notes (kept local on purpose)
 /docs/private/
+
+# Experiment output: raw sessions hold the agent's auth headers (bearer/OAuth tokens). Share only redacted reports.
+/results/
