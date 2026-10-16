@@ -5,7 +5,7 @@ name: windows
 
 on:
   push:
-    branches: [windows]
+    branches: [main, windows]
   pull_request:
     branches: [main]
   workflow_dispatch:
