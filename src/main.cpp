@@ -79,6 +79,11 @@ int main(int argc,char** argv){try{
     server.Post("/api/session/new",[&](const auto& req,auto& r){std::lock_guard lock(controls);requireStopped();auto j=json::parse(req.body);store.clear(j.value("name","Untitled capture"));output(r,{{"ok",true}});});
     server.Post("/api/sample",[&](const auto&,auto& r){std::lock_guard lock(controls);requireStopped();sample(store);output(r,{{"ok",true}});});
     server.Post(R"(/api/flows/(\d+)/notes)",[&](const auto& req,auto& r){store.note(idOf(req),json::parse(req.body).value("notes",""));output(r,{{"ok",true}});});
+    // Local file snapshots for provenance matching. The engine only stores bytes it is given; it never opens paths itself.
+    server.Get("/api/files",[&](const auto&,auto& r){output(r,store.snapshot()["localFiles"]);});
+    server.Post("/api/files",[&](const httplib::Request& req,httplib::Response& r){auto j=json::parse(req.body);auto id=store.addLocalFile(j.at("name").get<std::string>(),unbase64(j.at("base64").get<std::string>()),j.value("origin","api")=="browser"?"browser":"api");output(r,{{"id",id}});});
+    server.Get(R"(/api/files/(\d+))",[&](const auto& req,auto& r){auto f=store.localFile(idOf(req));if(f.is_null())r.status=404;output(r,f);});
+    server.Delete(R"(/api/files/(\d+))",[&](const auto& req,auto& r){bool ok=store.removeLocalFile(idOf(req));if(!ok)r.status=404;output(r,{{"ok",ok}});});
     server.Get("/api/session/download",[&](const auto&,auto& r){r.set_header("Content-Disposition","attachment; filename=capture.wscope");r.set_content(safeJson(store.archive()),"application/json");});
     server.Post("/api/session/import",[&](const auto& req,auto& r){std::lock_guard lock(controls);requireStopped();auto j=json::parse(req.body);store.restore(j);output(r,{{"ok",true}});});
     server.Post("/api/pcap/import",[&](const auto& req,auto& r){std::lock_guard lock(controls);requireStopped();auto packets=readCapture(req.body);store.clear("Imported packet capture");for(auto& p:packets)store.addPacket(std::move(p));output(r,{{"packets",packets.size()}});});
