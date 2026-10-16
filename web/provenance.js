@@ -78,6 +78,131 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Raw DEFLATE (RFC 1951), for WebSocket permessage-deflate
+  // ---------------------------------------------------------------------------
+
+  // permessage-deflate (RFC 7692) keeps one LZ77 window per direction across messages by default, so message N
+  // can copy bytes from message N-1. DecompressionStream cannot be fed one message at a time and asked what came out
+  // for it, so this small synchronous decoder keeps the window by hand. Same algorithm as zlib's puff.c: Huffman codes
+  // are decoded bit by bit, which is slow but simple, and the bodies here are kilobytes to a few megabytes.
+  const LEN_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  const LEN_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+  const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+  const CODE_LENGTH_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+  const WINDOW = 32768;
+
+  // Canonical Huffman code from code lengths: how many codes of each length, and the symbols in code order.
+  function huffman(lengths) {
+    const count = new Uint16Array(16), offs = new Uint16Array(16), symbol = new Uint16Array(lengths.length);
+    for (const l of lengths) count[l]++;
+    count[0] = 0;
+    for (let l = 1; l < 15; l++) offs[l + 1] = offs[l] + count[l];
+    for (let s = 0; s < lengths.length; s++) if (lengths[s]) symbol[offs[lengths[s]]++] = s;
+    return { count, symbol };
+  }
+  let fixedCodes = null;
+  function fixed() {
+    if (!fixedCodes) {
+      const l = new Uint8Array(288);
+      l.fill(8, 0, 144); l.fill(9, 144, 256); l.fill(7, 256, 280); l.fill(8, 280, 288);
+      fixedCodes = { lit: huffman(l), dist: huffman(new Uint8Array(30).fill(5)) };
+    }
+    return fixedCodes;
+  }
+
+  // Decodes `input` with `history` (the previous output, up to 32 KiB) as the starting window.
+  // Returns { bytes, history, error }: what was decoded (also when it stopped on an error) and the window to carry on.
+  // The input ends either at a final block or, for permessage-deflate, right after an empty stored block (sync flush).
+  function inflateRaw(input, history = new Uint8Array(0)) {
+    let out = new Uint8Array(Math.max(1024, history.length + input.length * 4));
+    out.set(history);
+    const start = history.length;
+    let o = start, pos = 0, bitbuf = 0, bitcnt = 0, error = '';
+    const put = (b) => {
+      if (o === out.length) { const grown = new Uint8Array(out.length * 2); grown.set(out); out = grown; }
+      out[o++] = b;
+    };
+    const bits = (n) => {
+      let v = bitbuf;
+      while (bitcnt < n) {
+        if (pos >= input.length) throw new Error('compressed data ended early');
+        v |= input[pos++] << bitcnt;
+        bitcnt += 8;
+      }
+      bitbuf = v >>> n;
+      bitcnt -= n;
+      return v & ((1 << n) - 1);
+    };
+    const decode = (h) => {
+      let code = 0, first = 0, index = 0;
+      for (let len = 1; len < 16; len++) {
+        code |= bits(1);
+        const count = h.count[len];
+        if (code - count < first) return h.symbol[index + (code - first)];
+        index += count; first += count; first <<= 1; code <<= 1;
+      }
+      throw new Error('invalid Huffman code');
+    };
+    const codes = (lit, dist) => {
+      for (;;) {
+        let sym = decode(lit);
+        if (sym < 256) { put(sym); continue; }
+        if (sym === 256) return;
+        sym -= 257;
+        if (sym >= 29) throw new Error('invalid length code');
+        const len = LEN_BASE[sym] + bits(LEN_EXTRA[sym]);
+        const ds = decode(dist);
+        if (ds >= 30) throw new Error('invalid distance code');
+        const d = DIST_BASE[ds] + bits(DIST_EXTRA[ds]);
+        if (d > o) throw new Error('distance reaches before the start of the window');
+        for (let k = 0; k < len; k++) put(out[o - d]);
+      }
+    };
+    const stored = () => {
+      bitbuf = 0; bitcnt = 0;
+      if (pos + 4 > input.length) throw new Error('compressed data ended early');
+      const len = input[pos] | (input[pos + 1] << 8), nlen = input[pos + 2] | (input[pos + 3] << 8);
+      pos += 4;
+      if (len !== (~nlen & 0xffff)) throw new Error('stored block length check failed');
+      if (pos + len > input.length) throw new Error('compressed data ended early');
+      for (let k = 0; k < len; k++) put(input[pos++]);
+    };
+    const dynamic = () => {
+      const nlen = bits(5) + 257, ndist = bits(5) + 1, ncode = bits(4) + 4;
+      if (nlen > 286 || ndist > 30) throw new Error('too many length or distance codes');
+      const cl = new Uint8Array(19);
+      for (let i = 0; i < ncode; i++) cl[CODE_LENGTH_ORDER[i]] = bits(3);
+      const clCode = huffman(cl);
+      const lengths = new Uint8Array(nlen + ndist);
+      for (let i = 0; i < nlen + ndist;) {
+        const sym = decode(clCode);
+        if (sym < 16) { lengths[i++] = sym; continue; }
+        let len = 0, rep;
+        if (sym === 16) { if (!i) throw new Error('repeat with no previous length'); len = lengths[i - 1]; rep = 3 + bits(2); }
+        else if (sym === 17) rep = 3 + bits(3);
+        else rep = 11 + bits(7);
+        if (i + rep > nlen + ndist) throw new Error('too many code lengths');
+        while (rep--) lengths[i++] = len;
+      }
+      if (!lengths[256]) throw new Error('no end-of-block code');
+      codes(huffman(lengths.subarray(0, nlen)), huffman(lengths.subarray(nlen)));
+    };
+    try {
+      for (let last = 0; !last;) {
+        if (pos >= input.length && bitcnt === 0) break;   // ended after a sync flush, not a final block
+        last = bits(1);
+        const type = bits(2);
+        if (type === 0) stored();
+        else if (type === 1) codes(fixed().lit, fixed().dist);
+        else if (type === 2) dynamic();
+        else throw new Error('invalid block type');
+      }
+    } catch (e) { error = e.message || String(e); }
+    return { bytes: out.slice(start, o), history: out.slice(Math.max(0, o - WINDOW), o), error };
+  }
+
+  // ---------------------------------------------------------------------------
   // Views of one body
   // ---------------------------------------------------------------------------
 
@@ -532,5 +657,5 @@
     };
   }
 
-  return { analyze, byteRuns, lineRuns, fragments, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  return { inflateRaw, analyze, byteRuns, lineRuns, fragments, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });

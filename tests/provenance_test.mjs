@@ -1,7 +1,8 @@
 // Tests for web/provenance.js, run with node (no browser, no engine).
 //   node tests/provenance_test.mjs
 import { createRequire } from 'node:module';
-import { gzipSync, deflateSync } from 'node:zlib';
+import zlib, { gzipSync, deflateSync } from 'node:zlib';
+import crypto from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const P = require('../web/provenance.js');
@@ -297,6 +298,42 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(r.coverage[0].matchedAnchors === 1, 'fragments count toward coverage');
   const none = await P.analyze({ localFiles: [{ id: 1, name: 'README.md', base64: b64(readme) }], flows: [flow(121, { res: JSON.stringify({ answer: 'it has a short line in it' }) })] });
   check(!none.matches.length, 'short lines are never matched as fragments');
+}
+
+// --- raw DEFLATE (for WebSocket permessage-deflate) ------------------------------
+// Compress one message at a time on a shared stream with a sync flush, the way permessage-deflate does,
+// and drop the 00 00 ff ff tail the sender removes.
+function messageDeflater(options = {}) {
+  const z = zlib.createDeflateRaw(options);
+  return (data) => new Promise((resolve) => {
+    const chunks = [];
+    const on = (c) => chunks.push(c);
+    z.on('data', on);
+    z.write(data);
+    z.flush(zlib.constants.Z_SYNC_FLUSH, () => { z.off('data', on); const all = Buffer.concat(chunks); resolve(all.subarray(0, all.length - 4)); });
+  });
+}
+const withTail = (payload) => new Uint8Array(Buffer.concat([payload, Buffer.from([0, 0, 0xff, 0xff])]));
+{
+  const text = Buffer.from(Array.from({ length: 3000 }, (_, i) => `line ${i} of a repetitive body ${(i * 7919) % 1000}`).join('\n'));
+  const same = (input, want) => { const r = P.inflateRaw(new Uint8Array(input)); return !r.error && Buffer.from(r.bytes).equals(want); };
+  check(same(zlib.deflateRawSync(text, { level: 0 }), text), 'inflateRaw: stored blocks');
+  check(same(zlib.deflateRawSync(Buffer.from('hello hello hello'), { strategy: zlib.constants.Z_FIXED }), Buffer.from('hello hello hello')), 'inflateRaw: fixed Huffman block');
+  check(same(zlib.deflateRawSync(text, { level: 9 }), text), 'inflateRaw: dynamic Huffman blocks');
+  const random = crypto.randomBytes(50000);
+  check(same(zlib.deflateRawSync(random), random), 'inflateRaw: incompressible bytes');
+  const cut = P.inflateRaw(new Uint8Array(zlib.deflateRawSync(text).subarray(0, 300)));
+  check(cut.error === 'compressed data ended early' && cut.bytes.length > 0, 'inflateRaw: a cut stream returns what decoded and says why it stopped');
+  check(P.inflateRaw(new Uint8Array([0xff, 0xff])).error !== '', 'inflateRaw: garbage is an error, not an exception');
+
+  const deflate = messageDeflater();
+  const first = 'first message: export const timeoutMs = 15000;';
+  const second = 'second message repeats: export const timeoutMs = 15000; and more';
+  const p1 = await deflate(first), p2 = await deflate(second);
+  const r1 = P.inflateRaw(withTail(p1));
+  const r2 = P.inflateRaw(withTail(p2), r1.history);
+  check(Buffer.from(r1.bytes).toString() === first && Buffer.from(r2.bytes).toString() === second, 'inflateRaw: messages decode in order with the window carried over');
+  check(p2.length < Buffer.byteLength(second) && P.inflateRaw(withTail(p2)).error !== '', 'inflateRaw: the second message really points into the first (fails without the window)');
 }
 
 // --- end of sections ----------------------------------------------------------
