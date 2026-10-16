@@ -142,7 +142,7 @@
   // ---------------------------------------------------------------------------
 
   const S = {
-    token: '', version: '', uiPort: 0, connected: true,
+    token: '', version: '', bodyLimit: 1024 * 1024, uiPort: 0, connected: true,
     revision: 0, session: {}, flows: [], packets: [], stats: {}, capture: {}, proxy: {}, systemProxy: {},
     flowById: new Map(), packetById: new Map(),
     interfaces: null,
@@ -641,7 +641,7 @@
       <td>${statusCell(f)}</td>
       ${showProc ? `<td class="small" title="${esc(f.process?.error || '')}">${f.process ? `${esc(f.process.name || '?')}<span class="path">pid ${esc(f.process.pid ?? '?')}</span>` : ''}</td>` : ''}
       <td class="mono small">${esc(f.protocol)}</td>
-      <td class="mono small">↑ ${fmtBytes(f.requestBytes)}${f.truncated ? ' <span class="badge warn" title="Body larger than the 1 MiB per-direction capture limit">cut</span>' : ''}<span class="path">↓ ${fmtBytes(f.responseBytes)}</span></td>
+      <td class="mono small">↑ ${fmtBytes(f.requestBytes)}${f.truncated ? ' <span class="badge warn" title="Body larger than the ${fmtBytes(S.bodyLimit)} per-direction capture limit">cut</span>' : ''}<span class="path">↓ ${fmtBytes(f.responseBytes)}</span></td>
       <td class="mono small">${esc(fmtDuration(f.duration))}</td>
     </tr>`;
   }
@@ -934,7 +934,7 @@
         <button data-action="body-download" data-side="${side}" title="Download the captured bytes exactly as received">Download</button>
       </div>
       <div class="small muted" style="margin-bottom:8px">${facts.join(' · ')}
-        ${body.truncated ? ' <span class="badge warn">truncated at 1 MiB capture limit</span>' : ''}
+        ${body.truncated ? ' <span class="badge warn">truncated at ${fmtBytes(S.bodyLimit)} capture limit</span>' : ''}
         ${body.sha256 ? `<br><span class="mono">sha256 ${esc(body.sha256)}</span>` : ''}</div>`;
 
     let view = '';
@@ -1807,6 +1807,7 @@
     bindEvents();
     if (OFFLINE) {
       S.session = ARCHIVE.session || {};
+      S.bodyLimit = ARCHIVE.bodyLimit || S.bodyLimit;
       S.flows = ARCHIVE.flows || [];
       S.packets = ARCHIVE.packets || [];
       S.stats = { flows: S.flows.length, packets: S.packets.length };
@@ -1818,7 +1819,7 @@
     try {
       const res = await fetch('/api/bootstrap', { cache: 'no-store' });
       const boot = await res.json();
-      S.token = boot.token; S.version = boot.version; S.uiPort = boot.uiPort;
+      S.token = boot.token; S.bodyLimit = boot.bodyLimit || S.bodyLimit; S.version = boot.version; S.uiPort = boot.uiPort;
     } catch (e) {
       document.getElementById('app').innerHTML = `<div class="empty"><strong>Cannot reach the WireScope engine</strong><p>${esc(e.message)}</p></div>`;
       return;
