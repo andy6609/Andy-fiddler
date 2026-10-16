@@ -8,3 +8,6 @@
 __pycache__/
 /.vcpkg-cache/
 /dist/
+
+# Private design notes (kept local on purpose)
+/docs/private/
