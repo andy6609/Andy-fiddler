@@ -1610,7 +1610,7 @@
     const items = [];
     if (a.bodyLimit) items.push(`Only the first ${fmtBytes(a.bodyLimit)} of each body is captured, so bytes past that are never searched.`);
     const cut = a.notes.filter((n) => /only the first/.test(n.note)).length;
-    if (cut) items.push(`${cut} bodies were cut at that limit.`);
+    if (cut) items.push(`${cut} ${cut === 1 ? 'body was' : 'bodies were'} cut at that limit.`);
     for (const n of a.notes.filter((x) => !/only the first/.test(x.note)).slice(0, 5)) items.push(`#${n.flowId} ${n.side}: ${n.note}`);
     return items.length ? `<div class="notice trace-limits">${items.map(esc).join('<br>')}</div>` : '';
   }
