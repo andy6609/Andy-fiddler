@@ -12,7 +12,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
-const P = require(path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'web', 'provenance.js'));
+// createRequire resolves a relative path against this file's URL. Building the path from URL.pathname breaks on
+// Windows ("/D:/a/..." is not a path there), which only the Windows CI run caught.
+const P = require('../web/provenance.js');
 
 const args = process.argv.slice(2);
 const sessionPath = args.find((a) => !a.startsWith('--') && args[args.indexOf(a) - 1] !== '--files');
