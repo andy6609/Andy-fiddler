@@ -1618,6 +1618,10 @@
   function traceStatus() {
     const T = S.trace;
     if (T.error) return `<div class="notice error-notice">${esc(T.error)}</div>`;
+    if (OFFLINE && ARCHIVE.redacted) {
+      return `<div class="empty">${icon('layers')}<strong>Nothing to trace in a redacted report</strong>
+        <p>Redaction removed every body and all local file snapshots before this report was written, so there is nothing to search or match.</p></div>`;
+    }
     if (T.running && !T.analysis) return '<p class="muted small" style="padding:16px">Reading the session and decoding bodies…</p>';
     return '';
   }
