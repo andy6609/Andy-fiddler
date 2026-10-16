@@ -23,6 +23,10 @@
  ───────────────────────────────
  v9  win_owner      연결 → 프로세스 (TCP 연결 표의 owning PID)
  v10 win_sysproxy   시스템 프록시가 세 군데인 이유 (WinINET / WinHTTP / 환경 변수)
+
+ 로컬 파일에서 출발
+ ──────────────────
+ v11 provenance     로컬 파일의 어느 부분이 어느 요청에 실려 나갔나 (canary, 줄 run)
 ```
 
 | 버전 | 핵심 질문 | 본체에서 해당하는 곳 | 노트 |
@@ -37,6 +41,7 @@
 | v8 | 두 요청의 차이를 판단 없이 어떻게 보여주나? | `web/app.js` Compare, `core.cpp` htmlReport | [v8](v8-notes.md) |
 | v9 | 이 연결은 어느 프로세스가 열었나? (Windows) | `process.cpp`, UI Process 열 | [v9](v9-notes.md) |
 | v10 | 시스템 프록시를 켜면 누가 따르고 누가 안 따르나? (Windows) | `sysproxy.cpp`, UI "Use as system proxy" | [v10](v10-notes.md) |
+| v11 | 로컬 파일의 어느 부분이 어느 요청에 실려 나갔나? | `web/provenance.js`, UI "Local files → requests" | [v11](v11-notes.md) |
 
 ---
 
@@ -92,3 +97,4 @@ macOS = 개발 호스트, Windows = GitHub Actions `windows-latest` 러너 (MSVC
 | v8 | diff, 보고서 escape/redact | (테스트 쪽 인코딩만) | 실제 에이전트 요청 쌍 |
 | v9 | `--self` client 쪽 PID == 자기 PID, `--port` 로 테스트 서버 LISTEN 줄의 PID (Windows) | — | 관리자 권한 프로세스 |
 | v10 | 세 구역 출력, `--set/--restore` 레지스트리 왕복 (Windows, CI 에서만) | — | 실제 브라우저가 따르는지 |
+| v11 | v1 이 기록한 실제 트래픽으로 canary·줄 run | — | 실제 에이전트 트래픽 |
