@@ -38,14 +38,19 @@ def main():
     env = dict(os.environ, FAKE_MODEL_URL=f"http://127.0.0.1:{server.server_address[1]}", PYTHONDONTWRITEBYTECODE="1")
     run = subprocess.run([sys.executable, os.path.join(KIT, "run_agent.py"), "--sandbox", sandbox, "--label", "fake-agent", "--out", out,
                           "--build", BUILD, "--task", "explain the config", "--timeout", "60", "--", sys.executable, os.path.join(KIT, "fake_agent.py"), "{task}"],
-                         env=env, capture_output=True, text=True)
+                         env=env, capture_output=True, encoding="utf-8", errors="replace")
     print("experiment 001 dry run")
     check(run.returncode == 0, f"run_agent finished {run.stderr[-300:]}")
-    meta = json.load(open(os.path.join(out, "run.json")))
+    meta = json.load(open(os.path.join(out, "run.json"), encoding="utf-8"))
     # a hung agent shows up here as exit "timeout" instead of the whole test running into ctest's limit
     check(meta["exit"] == 0 and meta["requests"] == 6 and meta["localFiles"] == 9, f"agent ran, 6 requests, 9 files registered ({meta})")
-    r = json.loads(subprocess.run(["node", os.path.join(ROOT, "scripts", "provenance_cli.mjs"), os.path.join(out, "session.wscope"), "--json"],
-                                  capture_output=True, text=True).stdout)
+    cli = subprocess.run(["node", os.path.join(ROOT, "scripts", "provenance_cli.mjs"), os.path.join(out, "session.wscope"), "--json"],
+                         capture_output=True, encoding="utf-8", errors="replace")
+    check(cli.returncode == 0, f"provenance CLI ran {cli.stderr[-600:]}")
+    if cli.returncode != 0:
+        print(f"{len(failures)} failures")
+        return 1
+    r = json.loads(cli.stdout)
     cov = {c["fileName"]: c for c in r["coverage"]}
     check(cov["src/config.ts"]["ratio"] == 1, "config.ts: whole file seen")
     check(cov["src/main.cpp"]["ranges"] == [[15, 30]], f"main.cpp: exactly lines 15-30 ({cov['src/main.cpp']['ranges']})")
@@ -57,8 +62,11 @@ def main():
     check({tokens["config"], tokens["design"], tokens["logo"]} <= seen, "canaries of the files that were sent are seen")
     check(not {tokens["env"], tokens["main"], tokens["readme"], tokens["strings"], tokens["csv"]} & seen, "canaries of files (or lines) never sent are not seen")
     check(any(m["fileName"] == "src/config.ts" and m["flowId"] == 4 for m in r["matches"]), "earlier tool results resent in later turns are visible")
-    summary = open(os.path.join(out, "summary.txt")).read()
+    summary = open(os.path.join(out, "summary.txt"), encoding="utf-8").read()
     check("HOSTS" in summary and "COVERAGE" in summary and "NOT SEARCHED" in summary, "summary.txt has every section")
+    # match lines read "#4 → POST host/path"; a cp1252 round trip on Windows would garble or drop the arrow
+    check("FAILED" not in summary and " → POST " in summary, "summary.txt is UTF-8 and the CLI did not fail")
+    check(" → POST " in run.stdout, "run_agent stdout carries the same UTF-8 summary")
     print(f"{len(failures)} failures")
     return 1 if failures else 0
 
