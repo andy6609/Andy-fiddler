@@ -179,6 +179,17 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(r.unknown.length === 1 && r.unknown[0] === 'WSCANARY-stray-zz', 'tokens seen in traffic but in no registered file are listed');
 }
 
+// --- line helpers ---------------------------------------------------------------------
+{
+  const arrow = P.splitLines('     1→#include <cstdio>\n     2→int main() {\n     3→  return 0;\n     4→}');
+  check(arrow.stripped && arrow.lines[1] === 'int main() {', 'arrow-numbered tool output is unnumbered');
+  const tab = P.splitLines('1\tfirst line\n2\tsecond line\n\n3\tthird line');
+  check(tab.stripped && tab.lines[3] === 'third line', 'tab-numbered lines are unnumbered, blank lines kept in place');
+  const plain = P.splitLines('2024 was a year\nnothing numbered here\nreally');
+  check(!plain.stripped, 'text that only occasionally starts with digits is left alone');
+  check(P.isTrivial('});') && P.isTrivial('return') && !P.isTrivial('const apiBase = process.env.API_BASE;'), 'short or punctuation-only lines are trivial');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);

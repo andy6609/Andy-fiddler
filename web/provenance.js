@@ -340,5 +340,29 @@
     return { sightings: unique, notSeen, unknown };
   }
 
-  return { prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  // ---------------------------------------------------------------------------
+  // Lines
+  // ---------------------------------------------------------------------------
+
+  // Lines are compared after trimming surrounding whitespace, so re-indentation or CRLF does not hide a match.
+  // A "trivial" line (short, or only brackets and punctuation) can extend a run but never start one:
+  // `}` or `return;` appear in every file and prove nothing on their own.
+  const norm = (line) => line.trim();
+  const TRIVIAL_LEN = 8;
+  const isTrivial = (n) => n.length < TRIVIAL_LEN || /^[\s{}()[\];,.:'"`<>/*#=-]*$/.test(n);
+
+  // File-reading tools often prefix every line with its number ("     1→code", "12\tcode", "  7: code", "3 | code").
+  // When most non-empty lines of a view carry such a prefix, strip it and record the transform.
+  const NUMBER_PREFIX = /^\s*\d+(?:→|\t| \| |: )/;
+  function splitLines(text) {
+    const lines = text.split('\n');
+    const nonEmpty = lines.filter((l) => l.trim());
+    const numbered = nonEmpty.filter((l) => NUMBER_PREFIX.test(l)).length;
+    if (nonEmpty.length >= 2 && numbered >= nonEmpty.length * 0.6) {
+      return { lines: lines.map((l) => l.replace(NUMBER_PREFIX, '')), stripped: true };
+    }
+    return { lines, stripped: false };
+  }
+
+  return { splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });
