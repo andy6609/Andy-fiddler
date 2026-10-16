@@ -154,16 +154,22 @@ def main():
             engine.proc.wait(timeout=10)
 
     archive = json.loads(archive_bytes)
+    # node prints UTF-8 (→, ←, file names, quoted lines). Without an explicit encoding Python on Windows decodes and
+    # writes with cp1252, which has no mapping for some of those bytes (0x90 in "←", many Korean characters).
     trace = subprocess.run(["node", os.path.join(ROOT, "scripts", "provenance_cli.mjs"), os.path.join(out, "session.wscope")],
-                           capture_output=True, text=True)
+                           capture_output=True, encoding="utf-8", errors="replace")
+    failed = "" if trace.returncode == 0 else f"PROVENANCE CLI FAILED (exit {trace.returncode}); the match section below is missing or partial\n\n"
     summary = f"label: {a.label}\ntask: {a.task}\ncommand: {' '.join(command)}\nexit: {code} after {seconds}s\n" \
-              f"local files registered: {registered}\n\n{hosts_section(archive)}\n\n{trace.stdout}{trace.stderr}"
-    with open(os.path.join(out, "summary.txt"), "w") as f:
+              f"local files registered: {registered}\n\n{hosts_section(archive)}\n\n{failed}{trace.stdout}{trace.stderr}"
+    with open(os.path.join(out, "summary.txt"), "w", encoding="utf-8") as f:
         f.write(summary)
     with open(os.path.join(out, "run.json"), "w") as f:
         json.dump({"label": a.label, "task": a.task, "command": command, "exit": code, "seconds": seconds,
                    "requests": len(archive["flows"]), "localFiles": registered, "bodyLimit": archive.get("bodyLimit")}, f, indent=2)
-    print(summary)
+    # print() would encode with cp1252 when stdout is a pipe on Windows and fail on the same characters; write UTF-8
+    # bytes instead (a Windows console takes UTF-8 bytes through sys.stdout.buffer too)
+    sys.stdout.buffer.write(summary.encode("utf-8") + b"\n")
+    sys.stdout.flush()
     return 0
 
 
