@@ -303,17 +303,22 @@
   }
   const looksLikeSse = (contentType, text) => /event-stream/i.test(contentType) || /^(event|data|id):/m.test(text.slice(0, 200));
 
-  function sseViews(flow, side, transforms, text) {
+  // A stream of events (SSE events, WebSocket messages). Each item becomes views of its own, and the same JSON
+  // field across items is also joined in order.
+  //   items: [{ text, transforms }] or [{ bytes, binary: true, transforms }]
+  //   prefix: locator of the stream ('events', 'ws'); rawSuffix: added for a non-JSON item ('.data' for SSE)
+  function eventViews(flow, side, items, { prefix, rawSuffix = '', joinTransforms }) {
     const views = [];
-    const joined = new Map();   // json path -> pieces in event order
-    parseSse(text).forEach((ev, i) => {
-      const parsed = tryJson(ev.data);
+    const joined = new Map();   // json path -> pieces in item order
+    items.forEach((item, i) => {
+      if (item.binary) { views.push(bytesView(flow, side, `${prefix}[${i}]`, item.transforms, item.bytes)); return; }
+      const parsed = tryJson(item.text);
       if (!parsed.ok) {
-        if (ev.data.length >= MIN_STRING) views.push(makeView(flow, side, `events[${i}].data`, [...transforms, 'sse'], ev.data));
+        if (item.text.length >= MIN_STRING) views.push(makeView(flow, side, `${prefix}[${i}]${rawSuffix}`, item.transforms, item.text));
         return;
       }
       for (const [path, value] of jsonStrings(parsed.value, '$', [])) {
-        views.push(makeView(flow, side, `events[${i}]${path.slice(1)}`, [...transforms, 'sse', 'json'], value));
+        views.push(makeView(flow, side, `${prefix}[${i}]${path.slice(1)}`, [...item.transforms, 'json'], value));
       }
       // short pieces are exactly what joining is for, so collect them without the length floor
       (function walk(v, path) {
@@ -324,9 +329,15 @@
     });
     for (const [path, pieces] of joined) {
       if (pieces.length < 2) continue;
-      views.push(makeView(flow, side, `events[*]${path.slice(1)} (joined ${pieces.length})`, [...transforms, 'sse', 'json', 'join'], pieces.join('')));
+      views.push(makeView(flow, side, `${prefix}[*]${path.slice(1)} (joined ${pieces.length})`, [...joinTransforms, 'json', 'join'], pieces.join('')));
     }
     return views;
+  }
+
+  // Server-sent events: each event's data is one item.
+  function sseViews(flow, side, transforms, text) {
+    const items = parseSse(text).map((ev) => ({ text: ev.data, transforms: [...transforms, 'sse'] }));
+    return eventViews(flow, side, items, { prefix: 'events', rawSuffix: '.data', joinTransforms: [...transforms, 'sse'] });
   }
 
   // multipart/form-data: the classic upload form (claude.ai used plain multipart in the internship captures).
