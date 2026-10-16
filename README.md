@@ -126,19 +126,6 @@ Windows is the real target. It builds with MSVC and the whole test suite runs on
 | Npcap live capture, Windows certificate store install, a real Windows 10/11 desktop | **not verified yet** |
 | Real AI services and coding agents | **not done yet**. That's the next experiment |
 
-## lab/
-
-Before (and next to) the main tool, I broke each idea out into its own small program. That's how I learn. The code comments and notes in `lab/` are in Korean.
-
-| Inside the proxy | On the wire | Showing it |
-|---|---|---|
-| v1 what to record, and body limits | v4 packets → fields and offsets | v7 engine ↔ browser, and what to lock down |
-| v2 TLS pass-through vs. termination | v5 packets → TCP byte stream, gaps | v8 structural diff, standalone HTML |
-| v3 HTTP/2 frames and HPACK | v6 libpcap/Npcap and BPF | |
-| **Windows only:** v9 connection → owning process | v10 the three places Windows keeps a proxy setting | |
-
-The roadmap, and which part of `src/` each one maps to, is in [docs/lab/README.md](docs/lab/README.md).
-
 ## Finding your way around
 
 | Doc | What's in it |
