@@ -2,7 +2,8 @@
 
 작성일: 2026-10-15, 같은 날 두 번째 세션에서 구현 상태를 갱신했다. 이 문서는 대화 맥락과 디스크 상태를 연결하는 시작점이다.
 
-> **추가 (2026-10-16, `feature/provenance` → main)**: 로컬 파일 → 요청 추적(provenance)을 넣었다. 사이드바 TRACE 아래 *Find in bodies* 와 *Local files → requests*, 판정은 `web/provenance.js`(브라우저·보고서·node 공용), 엔진에는 로컬 파일 스냅샷(`/api/files`)과 `--body-limit`. 실험 키트는 `experiments/001-agent-file-egress/`(가짜 에이전트 dry run 까지만, 실제 에이전트는 아직). 설계·한계: [PROVENANCE.md](PROVENANCE.md). 학습용 축소판: `lab/v11_provenance`.
+> **추가 (2026-10-16, `feature/provenance` → main)**: 로컬 파일 → 요청 추적(provenance)을 넣었다. 사이드바 TRACE 아래 *Find in bodies* 와 *Local files → requests*, 판정은 `web/provenance.js`(브라우저·보고서·node 공용), 엔진에는 로컬 파일 스냅샷(`/api/files`)과 `--body-limit`. 실험 키트는 `experiments/001-agent-file-egress/`.
+> **추가 (2026-10-17, `feature/agent-runs`)**: 실제 에이전트 실험. Claude Code 2.1.275 와 Codex CLI 0.163.0 에 과제 3개씩(칸마다 1회) — [실행 2–6](../experiments/001-agent-file-egress/runs/2026-10-17-claude-code-vs-codex.md). Codex 가 WebSocket(permessage-deflate)으로 대화해서 provenance 에 WebSocket 해석·raw DEFLATE·JSON 안의 JSON·그룹별 이어붙이기·파일 이름 노출을 넣었다. `compare_runs.mjs` 로 실행 비교. **범위는 'provenance 분석기 + Claude Code·Codex 측정'까지로 사용자와 정했다** — 파일 I/O 추적(ETW 등), 다른 에이전트는 범위 밖. 설계·한계: [PROVENANCE.md](PROVENANCE.md). 학습용 축소판: `lab/v11_provenance`.
 >
 > **현재 상태 (2026-10-15 두 번째 세션)**: 엔진, `web/app.js`, 테스트가 있다. macOS 개발 호스트에서 빌드, 단위 테스트, curl/nghttpd를 이용한 end-to-end 테스트, headless Chrome UI 조작까지 통과했다. **Windows 빌드, Npcap 실제 캡처, Windows 인증서 저장소, 실제 AI 서비스·에이전트 트래픽은 아직 검증하지 않았다.** 아래에서는 “구현됨”과 “검증됨”을 구분한다.
 
@@ -107,9 +108,9 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 | `src/main.cpp` | 로컬 API, token/Host/Origin 검사, 정적 파일, CLI, Windows 브라우저 열기 | integration 테스트(403 경계 포함) |
 | `web/index.html`, `web/app.css` | 컨테이너, 밀도 높은 검사 도구 스타일 | Chrome 1440×900 스크린샷 |
 | `web/app.js` | 실시간/오프라인 공용 UI(아래 7절) + TRACE 화면(Find in bodies, Local files → requests, 파일 추가/삭제, 일치 inspector) | headless Chrome CDP 조작, JS 오류 0 |
-| `web/provenance.js` | body → view(gzip·JSON·SSE·join·base64·multipart·form), 검색, canary, 줄 run, fragment, 바이너리, 중복 정리, 커버리지. 브라우저·보고서·node 공용 | `tests/provenance_test.mjs` 71개 |
+| `web/provenance.js` | body → view(gzip·JSON·JSON 안의 JSON·SSE·WebSocket·permessage-deflate·그룹별 join·base64·multipart·form), 검색, canary, 이름, 줄 run, fragment, 바이너리, 중복 정리, 커버리지. 브라우저·보고서·node 공용 | `tests/provenance_test.mjs` 115개. 실제 Claude Code·Codex 세션 |
 | `scripts/provenance_cli.mjs` | `.wscope` 를 터미널에서 분석, `--files DIR`, `--json` | 실험 dry run 에서 사용 |
-| `experiments/001-agent-file-egress/` | 실험 절차, `make_sandbox.py`(canary 저장소), `run_agent.py`(에이전트 하나 기록), `fake_agent.py`(정답 아는 가짜) | `tests/experiment_dryrun_test.py` 14개. 실제 에이전트: Claude Code 2.1.275 1회 (`runs/`) |
+| `experiments/001-agent-file-egress/` | 실험 절차, `make_sandbox.py`(canary 저장소), `run_agent.py`(에이전트 하나 기록), `fake_agent.py`(정답 아는 가짜), `compare_runs.mjs`(파일별 비교표) | `tests/experiment_dryrun_test.py` 16개. 실제 에이전트: Claude Code·Codex 각 3회 (`runs/`) |
 | `src/process.cpp` | accept 직후 `GetExtendedTcpTable` 로 연결 → PID, exe/경로/명령줄/부모 | Windows 러너: 직접 띄운 curl/python 의 PID·경로·명령줄·부모와 일치 |
 | `src/sysproxy.cpp` | WinINET 시스템 프록시 켜기/복원, 백업 파일, 비정상 종료 감지 | Windows 러너: 레지스트리 반영, 프록시 인자 없는 Python urllib 가 따라옴, 4가지 복원 경로 |
 | `tests/core_tests.cpp` | 소켓 없는 단위 테스트 (128개) | 통과 (macOS, Windows 러너 run 38881207226) |
@@ -201,7 +202,7 @@ flow meta에 `port`가 추가되었고, HTTP/1 `protocol`은 실제 요청 버�
 1. 이 문서를 읽고 `git status`와 `ctest --test-dir build --output-on-failure`로 현재 상태를 확인한다. 이미 합의한 목표를 다시 묻지 않는다.
 2. ~~**Windows 빌드**~~: 완료 — windows 브랜치에서 작업해 2026-10-16 main 에 합침 (vcpkg manifest, MSVC `/W4` 경고 0, `pcap_stat` 헤더 대조). [WINDOWS.md](WINDOWS.md) 참고.
 3. **Windows 실제 검증**: 실제 데스크톱에서 Npcap 캡처(loopback 포함), CA 신뢰 설치·삭제(확인 대화상자), Edge + "Use as system proxy" 로 HTTPS·h2 관찰. 결과와 실패를 그대로 기록한다. (러너에서 확인한 범위는 WINDOWS.md 3절)
-4. **AI 클라이언트 실험 (Claude Code 2.1.275 1회 완료, 2026-10-16 — `experiments/001-agent-file-egress/runs/`)**: `experiments/001-agent-file-egress/README.md` 절차대로 `make_sandbox.py` → `run_agent.py --label … --task … -- <에이전트 명령>` 을 에이전트마다 실행하고, `summary.txt`·`session.wscope` 를 비교한다. **실제 에이전트 실행은 사용자 계정으로 외부 서비스에 요청이 나가므로 사용자 확인 후에만.** 결과는 관찰로만 쓴다(한 번의 관찰을 "항상"으로 일반화하지 않음).
+4. **AI 클라이언트 실험 (Claude Code 2.1.275·Codex CLI 0.163.0 각 과제 3개 완료, 2026-10-17 — `experiments/001-agent-file-egress/runs/`. 범위는 여기까지)**: `experiments/001-agent-file-egress/README.md` 절차대로 `make_sandbox.py` → `run_agent.py --label … --task … -- <에이전트 명령>` 을 에이전트마다 실행하고, `summary.txt`·`session.wscope` 를 비교한다. **실제 에이전트 실행은 사용자 계정으로 외부 서비스에 요청이 나가므로 사용자 확인 후에만.** 결과는 관찰로만 쓴다(한 번의 관찰을 "항상"으로 일반화하지 않음).
 4-1. provenance 다음 후보: 파일 I/O 추적(macOS `fs_usage`, Windows ETW/Process Monitor)을 시간·PID 로 provenance 결과와 맞추기 — "어느 프로세스가 읽었나"까지. 의미 유사도 판정은 판단 문장이 생기므로 하지 않기로 했다.
 5. `Store` 메모리 상한(4번), proxy authority 엣지 케이스 테스트, 학습용 코드 포맷 정리.
 6. CI: Windows 는 `.github/workflows/windows.yml` (MSVC 빌드 + 전체 ctest). macOS/Linux job 은 아직 없다. GitHub 로그는 로그인해야 받을 수 있어서 결과는 annotation 으로도 남긴다 (`.github/ci_annotate.py`).
