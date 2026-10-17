@@ -320,13 +320,23 @@
   }
   const looksLikeSse = (contentType, text) => /event-stream/i.test(contentType) || /^(event|data|id):/m.test(text.slice(0, 200));
 
+  // Joining is per stream of related events: same `type` and, when present, the same block or item. OpenAI's
+  // Responses API sends output text and tool-call input both as `delta`, told apart only by type and item_id;
+  // joined together they would be neither.
+  const GROUP_KEYS = ['type', 'index', 'output_index', 'content_index', 'item_id'];
+  function groupOf(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { key: '', label: '' };
+    const parts = GROUP_KEYS.filter((k) => typeof value[k] === 'string' || typeof value[k] === 'number').map((k) => [k, String(value[k])]);
+    return { key: parts.map(([k, v]) => `${k}=${v}`).join(','), label: parts.map(([k, v]) => `${k}=${k === 'item_id' && v.length > 24 ? `${v.slice(0, 12)}…` : v}`).join(', ') };   // long opaque ids shortened for display only
+  }
+
   // A stream of events (SSE events, WebSocket messages). Each item becomes views of its own, and the same JSON
-  // field across items is also joined in order.
+  // field across related items is also joined in order.
   //   items: [{ text, transforms }] or [{ bytes, binary: true, transforms }]
   //   prefix: locator of the stream ('events', 'ws'); rawSuffix: added for a non-JSON item ('.data' for SSE)
   function eventViews(flow, side, items, { prefix, rawSuffix = '', joinTransforms }) {
     const views = [];
-    const joined = new Map();   // json path -> pieces in item order
+    const joined = new Map();   // group + json path -> { path, label, pieces in item order }
     items.forEach((item, i) => {
       if (item.binary) { views.push(bytesView(flow, side, `${prefix}[${i}]`, item.transforms, item.bytes)); return; }
       const parsed = tryJson(item.text);
@@ -336,15 +346,20 @@
       }
       views.push(...jsonViews(flow, side, (path) => `${prefix}[${i}]${path.slice(1)}`, item.transforms, parsed.value));
       // short pieces are exactly what joining is for, so collect them without the length floor
+      const group = groupOf(parsed.value);
       (function walk(v, path) {
-        if (typeof v === 'string') { if (!joined.has(path)) joined.set(path, []); joined.get(path).push(v); }
+        if (typeof v === 'string') {
+          const k = `${group.key}\u0000${path}`;
+          if (!joined.has(k)) joined.set(k, { path, label: group.label, pieces: [] });
+          joined.get(k).pieces.push(v);
+        }
         else if (Array.isArray(v)) v.forEach((x, k) => walk(x, `${path}[${k}]`));
         else if (v && typeof v === 'object') for (const k of Object.keys(v)) walk(v[k], path + keyPath(k));
       })(parsed.value, '$');
     });
-    for (const [path, pieces] of joined) {
+    for (const { path, label, pieces } of joined.values()) {
       if (pieces.length < 2) continue;
-      const loc = `${prefix}[*]${path.slice(1)} (joined ${pieces.length})`;
+      const loc = `${prefix}[*]${path.slice(1)} (joined ${pieces.length}${label ? `; ${label}` : ''})`;
       const text = pieces.join('');
       views.push(makeView(flow, side, loc, [...joinTransforms, 'json', 'join'], text));
       // streamed tool input (Anthropic delta.partial_json, OpenAI arguments deltas) is JSON only once joined

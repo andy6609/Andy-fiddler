@@ -87,12 +87,12 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   const pieces = ['int main(', 'int argc) {\n', '  return run();\n', '}\n'];
   const sse = pieces.map((t, i) => `event: content_block_delta\ndata: ${JSON.stringify({ index: 0, delta: { type: 'text_delta', text: t } })}\n\n`).join('') + 'event: ping\ndata: keepalive\n\n';
   const { views } = await P.archiveViews({ flows: [flow(30, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] });
-  const joined = views.find((v) => v.locator === 'events[*].delta.text (joined 4)');
+  const joined = views.find((v) => v.locator === 'events[*].delta.text (joined 4; index=0)');
   check(joined && joined.text === pieces.join(''), 'streamed text pieces are joined in event order');
   check(joined && joined.transforms.join() === 'sse,json,join', 'joining is recorded as a transform');
   check(views.some((v) => v.locator === 'events[1].delta.text' && v.text === 'int argc) {\n'), 'each event field is also its own view');
   check(views.some((v) => v.locator === 'events[4].data' && v.text === 'keepalive'), 'non-JSON event data is kept as text');
-  check(views.some((v) => v.locator === 'events[*].delta.type (joined 4)' && v.text === 'text_delta'.repeat(4)), 'every repeated field gets a joined view, not only text');
+  check(views.some((v) => v.locator === 'events[*].delta.type (joined 4; index=0)' && v.text === 'text_delta'.repeat(4)), 'every repeated field gets a joined view, not only text');
 }
 
 // --- base64 and binary --------------------------------------------------------
@@ -443,6 +443,25 @@ const wsFlow = (id, req, res, extensions = 'permessage-deflate') => ({
   check(joinedInput && joinedInput.text === 'alpha line of file b\nbeta line of file b\n' && joinedInput.transforms.join() === 'sse,json,join,json', 'joined partial_json is parsed into the tool input fields');
   const r = await P.analyze({ localFiles: [{ id: 1, name: 'src/b.ts', base64: b64('alpha line of file b\nbeta line of file b\n') }], flows: [flow(303, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] });
   check(r.matches.some((m) => m.kind === 'lines' && m.fileFrom === 1 && m.fileTo === 2 && m.locator.endsWith('▸ $.content')), 'file lines written by a streamed tool call are matched');
+}
+
+// --- joined streams are grouped -------------------------------------------------------
+{
+  // OpenAI Responses: text and tool-call input both arrive as `delta`, separated only by type and item_id
+  const args = JSON.stringify({ cmd: 'cat src/c.ts' });
+  const events = [
+    { type: 'response.output_text.delta', item_id: 'msg_1', delta: 'Let me look ' },
+    { type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: args.slice(0, 9) },
+    { type: 'response.output_text.delta', item_id: 'msg_1', delta: 'at the file.' },
+    { type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: args.slice(9) },
+  ];
+  const sse = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
+  const { views } = await P.archiveViews({ flows: [flow(310, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] });
+  const text = views.find((v) => v.locator === 'events[*].delta (joined 2; type=response.output_text.delta, item_id=msg_1)');
+  const call = views.find((v) => v.locator === 'events[*].delta (joined 2; type=response.function_call_arguments.delta, item_id=fc_1) ▸ $.cmd');
+  check(text && text.text === 'Let me look at the file.', 'joined text stays separate from tool-call input sent in the same field');
+  check(call && call.text === 'cat src/c.ts', 'joined tool-call arguments are their own stream and parse as JSON');
+  check(!views.some((v) => v.locator === 'events[*].delta (joined 4)'), 'no join mixes the two streams');
 }
 
 // --- end of sections ----------------------------------------------------------
