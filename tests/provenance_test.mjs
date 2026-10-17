@@ -420,6 +420,31 @@ const wsFlow = (id, req, res, extensions = 'permessage-deflate') => ({
   check(cv.views.some((v) => v.locator === 'ws[0].text') && cv.notes.some((n) => /last frame is incomplete/.test(n.note)), 'ws: messages before a cut frame are decoded, the cut is reported');
 }
 
+// --- JSON inside JSON strings -----------------------------------------------------
+{
+  const inner = { path: 'src/a.ts', content: 'first line of a\nsecond line of a' };
+  const body = JSON.stringify({ arguments: JSON.stringify(inner) });
+  const { views } = await P.archiveViews({ flows: [flow(300, { req: body, reqHeaders: [['Content-Type', 'application/json']] })] });
+  const nested = views.find((v) => v.locator === '$.arguments ▸ $.content');
+  check(nested && nested.text === inner.content && nested.transforms.join() === 'json,json', 'a JSON string that is JSON is parsed again (tool-call arguments)');
+  check(views.some((v) => v.locator === '$.arguments' && v.text === JSON.stringify(inner)), 'the outer string stays as its own view');
+
+  const four = JSON.stringify({ a: JSON.stringify({ b: JSON.stringify({ c: JSON.stringify({ d: 'deepest string here' }) }) }) });
+  const deep = (await P.archiveViews({ flows: [flow(301, { req: four })] })).views;
+  check(deep.some((v) => v.locator === '$.a ▸ $.b ▸ $.c') && !deep.some((v) => v.locator.endsWith('▸ $.d')), 'strings are parsed again at most twice');
+  check(!(await P.archiveViews({ flows: [flow(302, { req: JSON.stringify({ n: '[not json' }) })] })).views.some((v) => v.locator.includes('▸')), 'a string that only looks like JSON stays a string');
+
+  // Anthropic streams tool input as delta.partial_json pieces; only the joined text is JSON
+  const toolInput = JSON.stringify({ file_path: 'src/b.ts', content: 'alpha line of file b\nbeta line of file b\n' });
+  const parts = [toolInput.slice(0, 15), toolInput.slice(15, 50), toolInput.slice(50)];
+  const sse = parts.map((t) => `event: content_block_delta\ndata: ${JSON.stringify({ index: 1, delta: { type: 'input_json_delta', partial_json: t } })}\n\n`).join('');
+  const sv = (await P.archiveViews({ flows: [flow(303, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] })).views;
+  const joinedInput = sv.find((v) => v.locator.startsWith('events[*].delta.partial_json') && v.locator.endsWith('▸ $.content'));
+  check(joinedInput && joinedInput.text === 'alpha line of file b\nbeta line of file b\n' && joinedInput.transforms.join() === 'sse,json,join,json', 'joined partial_json is parsed into the tool input fields');
+  const r = await P.analyze({ localFiles: [{ id: 1, name: 'src/b.ts', base64: b64('alpha line of file b\nbeta line of file b\n') }], flows: [flow(303, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] });
+  check(r.matches.some((m) => m.kind === 'lines' && m.fileFrom === 1 && m.fileTo === 2 && m.locator.endsWith('▸ $.content')), 'file lines written by a streamed tool call are matched');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);

@@ -279,6 +279,23 @@
   }
   function tryJson(text) { try { return { ok: true, value: JSON.parse(text) }; } catch { return { ok: false }; } }
 
+  // A JSON string that is itself JSON (tool-call arguments, a tool result wrapped as {"output": "..."}) is parsed
+  // again, up to two levels, so the text inside is unescaped too. The locator shows both paths: `$.arguments ▸ $.content`.
+  const NESTED_DEPTH = 2;
+  function jsonViews(flow, side, loc, transforms, value, depth = 0) {
+    const views = [];
+    const strings = jsonStrings(value, '$', []);
+    for (const [path, s] of strings) {
+      views.push(makeView(flow, side, loc(path), [...transforms, 'json'], s));
+      const inner = depth < NESTED_DEPTH && /^\s*[[{]/.test(s) ? tryJson(s) : null;
+      if (inner && inner.ok && inner.value && typeof inner.value === 'object') {
+        views.push(...jsonViews(flow, side, (p) => `${loc(path)} ▸ ${p}`, [...transforms, 'json'], inner.value, depth + 1));
+      }
+    }
+    views.push(...base64Views(flow, side, transforms, strings, loc));
+    return views;
+  }
+
   // Server-sent events: a streamed reply arrives in many small events. Each event's data is a view, and
   // the same JSON field across events is also joined in order (e.g. every delta.text), because text a
   // model writes back is split across events and would never match piece by piece.
@@ -317,9 +334,7 @@
         if (item.text.length >= MIN_STRING) views.push(makeView(flow, side, `${prefix}[${i}]${rawSuffix}`, item.transforms, item.text));
         return;
       }
-      for (const [path, value] of jsonStrings(parsed.value, '$', [])) {
-        views.push(makeView(flow, side, `${prefix}[${i}]${path.slice(1)}`, [...item.transforms, 'json'], value));
-      }
+      views.push(...jsonViews(flow, side, (path) => `${prefix}[${i}]${path.slice(1)}`, item.transforms, parsed.value));
       // short pieces are exactly what joining is for, so collect them without the length floor
       (function walk(v, path) {
         if (typeof v === 'string') { if (!joined.has(path)) joined.set(path, []); joined.get(path).push(v); }
@@ -329,7 +344,12 @@
     });
     for (const [path, pieces] of joined) {
       if (pieces.length < 2) continue;
-      views.push(makeView(flow, side, `${prefix}[*]${path.slice(1)} (joined ${pieces.length})`, [...joinTransforms, 'json', 'join'], pieces.join('')));
+      const loc = `${prefix}[*]${path.slice(1)} (joined ${pieces.length})`;
+      const text = pieces.join('');
+      views.push(makeView(flow, side, loc, [...joinTransforms, 'json', 'join'], text));
+      // streamed tool input (Anthropic delta.partial_json, OpenAI arguments deltas) is JSON only once joined
+      const inner = /^\s*[[{]/.test(text) ? tryJson(text) : null;
+      if (inner && inner.ok && inner.value && typeof inner.value === 'object') views.push(...jsonViews(flow, side, (p) => `${loc} ▸ ${p}`, [...joinTransforms, 'json', 'join'], inner.value, 1));
     }
     return views;
   }
@@ -435,14 +455,14 @@
   // Attachments often ride inside JSON as base64 (images, documents, "file_data" fields).
   // Only long strings made purely of the base64 alphabet are tried, so ordinary text is left alone.
   const BASE64_MIN = 64;
-  function base64Views(flow, side, transforms, strings) {
+  function base64Views(flow, side, transforms, strings, loc = (p) => p) {
     const out = [];
     for (const [path, value] of strings) {
       const v = value.startsWith('data:') && value.includes(';base64,') ? value.slice(value.indexOf(';base64,') + 8) : value;
       if (v.length < BASE64_MIN || v.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(v)) continue;
       let bytes;
       try { bytes = b64ToBytes(v); } catch { continue; }
-      out.push(bytesView(flow, side, path, [...transforms, 'json', 'base64'], bytes));
+      out.push(bytesView(flow, side, loc(path), [...transforms, 'json', 'base64'], bytes));
     }
     return out;
   }
@@ -479,9 +499,7 @@
     views.unshift(makeView(flow, side, 'body', transforms, text));
     const parsed = tryJson(text);
     if (parsed.ok) {
-      const strings = jsonStrings(parsed.value, '$', []);
-      for (const [path, value] of strings) views.push(makeView(flow, side, path, [...transforms, 'json'], value));
-      views.push(...base64Views(flow, side, transforms, strings));
+      views.push(...jsonViews(flow, side, (path) => path, transforms, parsed.value));
     } else if (looksLikeSse(headerValue(msg.headers, 'content-type'), text)) {
       views.push(...sseViews(flow, side, transforms, text));
     }
