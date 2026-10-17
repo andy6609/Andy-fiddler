@@ -67,6 +67,13 @@ def main():
     # match lines read "#4 → POST host/path"; a cp1252 round trip on Windows would garble or drop the arrow
     check("FAILED" not in summary and " → POST " in summary, "summary.txt is UTF-8 and the CLI did not fail")
     check(" → POST " in run.stdout, "run_agent stdout carries the same UTF-8 summary")
+    cmp = subprocess.run(["node", os.path.join(KIT, "compare_runs.mjs"), out, "--json"], capture_output=True, encoding="utf-8", errors="replace")
+    runs = json.loads(cmp.stdout) if cmp.returncode == 0 else []
+    files = runs[0]["perFile"] if runs else {}
+    check(bool(files) and files["src/config.ts"]["lines"]["seen"] == files["src/config.ts"]["lines"]["of"] and files["src/config.ts"]["canary"],
+          f"compare_runs: config.ts fully seen in requests {cmp.stderr[-300:]}")
+    check(bool(files) and not files[".env"]["canary"] and files[".env"]["lines"]["seen"] == 0 and runs[0]["modelMessages"] == runs[0]["modelRequests"],
+          "compare_runs: .env not seen; one model message per HTTP request")
     print(f"{len(failures)} failures")
     return 1 if failures else 0
 
