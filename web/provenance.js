@@ -586,6 +586,28 @@
   const CANARY = /WSCANARY-[A-Za-z0-9_-]{2,64}/g;
   const lineAt = (text, offset) => { let n = 1; for (let i = text.indexOf('\n'); i >= 0 && i < offset; i = text.indexOf('\n', i + 1)) n++; return n; };
 
+  // The same occurrence is visible in several views of one body: the raw body, a JSON string, that string parsed
+  // again (`… ▸ $.output`), a joined stream. Keep the most specific view, and one row per view with a count
+  // (a tool result can legitimately hold the same thing twice, e.g. `cat` and `grep` output of one file).
+  // `group(x)` names what counts as "the same thing in the same body".
+  function collapse(sightings, group) {
+    const decoded = new Set(sightings.filter((x) => x.locator !== 'body').map(group));
+    const unjoined = new Set(sightings.filter((x) => x.locator !== 'body' && !x.transforms.includes('join')).map(group));
+    const locators = new Map();
+    for (const x of sightings) { if (!locators.has(group(x))) locators.set(group(x), new Set()); locators.get(group(x)).add(x.locator); }
+    const rows = new Map();
+    for (const x of sightings) {
+      const k = group(x);
+      if (x.locator === 'body' && decoded.has(k)) continue;
+      if (x.transforms.includes('join') && unjoined.has(k)) continue;
+      if ([...locators.get(k)].some((l) => l.startsWith(`${x.locator} ▸ `))) continue;
+      const row = `${k}/${x.locator}`;
+      if (rows.has(row)) rows.get(row).count++;
+      else rows.set(row, { ...x, count: 1 });
+    }
+    return [...rows.values()];
+  }
+
   function findCanaries(files, views, pattern = CANARY) {
     const origin = new Map();                 // token -> [{fileId, fileName, line}]
     for (const f of files) {
@@ -604,28 +626,42 @@
         seen.add(token);
       }
     }
-    // The same occurrence is visible in several views of one body: the raw body, a JSON string, that string parsed
-    // again (`… ▸ $.output`), a joined stream. Keep the most specific view, and one row per view with a count
-    // (a tool result can legitimately hold the token twice, e.g. `cat` and `grep` output of the same file).
-    const body = (x) => `${x.token}/${x.flowId}/${x.side}`;
-    const decoded = new Set(sightings.filter((x) => x.locator !== 'body').map(body));
-    const unjoined = new Set(sightings.filter((x) => x.locator !== 'body' && !x.transforms.includes('join')).map(body));
-    const locators = new Map();
-    for (const x of sightings) { if (!locators.has(body(x))) locators.set(body(x), new Set()); locators.get(body(x)).add(x.locator); }
-    const rows = new Map();
-    for (const x of sightings) {
-      const k = body(x);
-      if (x.locator === 'body' && decoded.has(k)) continue;
-      if (x.transforms.includes('join') && unjoined.has(k)) continue;
-      if ([...locators.get(k)].some((l) => l.startsWith(`${x.locator} ▸ `))) continue;
-      const row = `${k}/${x.locator}`;
-      if (rows.has(row)) rows.get(row).count++;
-      else rows.set(row, { ...x, count: 1 });
-    }
-    const unique = [...rows.values()];
+    const unique = collapse(sightings, (x) => `${x.token}/${x.flowId}/${x.side}`);
     const notSeen = [...origin].filter(([token]) => !seen.has(token)).map(([token, from]) => ({ token, from }));
     const unknown = [...new Set(unique.filter((x) => !x.from.length).map((x) => x.token))];
     return { sightings: unique, notSeen, unknown };
+  }
+
+  // File names. A tool result such as `ls -la`, or a prompt that says "fix src/config.ts", sends names and not
+  // contents, so neither canaries nor line runs see it. Look for each registered file's relative path and, when it
+  // is distinctive enough (4+ characters), its base name, as a whole name: not part of a longer word or name
+  // (`.env` inside `.env.example` or `dotenv` does not count). An absolute path ending in the relative path counts.
+  // Requests only: a name in a response came from the server (a plugin catalog mentions `.env` and `README.md`
+  // dozens of times), not from this machine. A common name can still appear in a request for unrelated reasons,
+  // which is why every row keeps its context.
+  const NAME_BEFORE = /[A-Za-z0-9_.-]/;
+  const NAME_AFTER = /^(?:[A-Za-z0-9_-]|\.[A-Za-z0-9])/;
+  function findNames(files, views) {
+    const targets = [];
+    for (const f of files) {
+      targets.push({ fileId: f.id, fileName: f.name, form: 'path', needle: f.name });
+      const base = f.name.split('/').pop();
+      if (base !== f.name && base.length >= 4) targets.push({ fileId: f.id, fileName: f.name, form: 'name', needle: base });
+    }
+    const sightings = [];
+    for (const v of views) {
+      if (v.binary || v.side !== 'request') continue;
+      for (const t of targets) {
+        for (let at = v.text.indexOf(t.needle); at >= 0; at = v.text.indexOf(t.needle, at + 1)) {
+          const end = at + t.needle.length;
+          if ((at && NAME_BEFORE.test(v.text[at - 1])) || NAME_AFTER.test(v.text.slice(end, end + 2))) continue;
+          // a base name preceded by its own directory is the relative path, already counted
+          if (t.form === 'name' && v.text.slice(Math.max(0, end - t.fileName.length), end) === t.fileName) continue;
+          sightings.push({ fileId: t.fileId, fileName: t.fileName, form: t.form, name: t.needle, flowId: v.flowId, side: v.side, locator: v.locator, transforms: v.transforms, offset: at, excerpt: excerpt(v, at, t.needle.length) });
+        }
+      }
+    }
+    return collapse(sightings, (x) => `${x.fileId}/${x.form}/${x.flowId}/${x.side}`).sort((a, b) => a.flowId - b.flowId || a.fileId - b.fileId);
   }
 
   // ---------------------------------------------------------------------------
@@ -813,6 +849,7 @@
       viewCount: views.length,
       matches,
       canaries: findCanaries(files, views),
+      names: findNames(files, views),
       coverage: coverageList,
       notes,
       bodyLimit: archive.bodyLimit || null,
@@ -820,5 +857,5 @@
     };
   }
 
-  return { inflateRaw, wsFrames, wsMessages, wsDeflate, analyze, byteRuns, lineRuns, fragments, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  return { inflateRaw, wsFrames, wsMessages, wsDeflate, analyze, byteRuns, lineRuns, fragments, coverage, splitLines, isTrivial, prepareFiles, findCanaries, findNames, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });

@@ -469,6 +469,33 @@ const wsFlow = (id, req, res, extensions = 'permessage-deflate') => ({
   check(!views.some((v) => v.locator === 'events[*].delta (joined 4)'), 'no join mixes the two streams');
 }
 
+// --- file names --------------------------------------------------------------------
+{
+  const files = P.prepareFiles([
+    { id: 1, name: '.env', base64: b64('KEY=1\n') },
+    { id: 2, name: 'src/config.ts', base64: b64('export const A = 1;\n') },
+    { id: 3, name: 'src/a.c', base64: b64('int a;\n') },
+  ]);
+  const ls = '-rw-r--r--  1 me  staff  144 Oct 16 .env\ndrwxr-xr-x  5 me  staff  160 Oct 16 src\n';
+  const req = JSON.stringify({ messages: [
+    { role: 'user', content: [{ type: 'tool_result', content: ls }] },
+    { role: 'user', content: 'see .env.example, dotenv and /home/me/repo/src/config.ts; listing: config.ts\na.c' },
+  ] });
+  const res = JSON.stringify({ text: 'I read .env and src/config.ts' });
+  const { views } = await P.archiveViews({ flows: [flow(320, { req, res })] });
+  const names = P.findNames(files, views);
+  const env = names.filter((n) => n.fileId === 1);
+  check(env.length === 1 && env[0].locator === '$.messages[0].content[0].content' && env[0].excerpt.match === '.env', 'a file name in an ls listing is found, at its JSON path');
+  check(!names.some((n) => n.fileId === 1 && n.locator === '$.messages[1].content'), '.env inside .env.example or dotenv is not counted');
+  check(names.some((n) => n.fileId === 2 && n.form === 'path' && n.locator === '$.messages[1].content'), 'an absolute path ending in the relative path counts as the path');
+  check(names.some((n) => n.fileId === 2 && n.form === 'name' && n.locator === '$.messages[1].content'), 'the bare base name counts as the name');
+  check(!names.filter((n) => n.fileId === 2 && n.form === 'name').some((n) => n.excerpt.before.endsWith('src/')), 'a base name that is part of the relative path is not counted twice');
+  check(!names.some((n) => n.fileId === 3 && n.form === 'name'), 'base names shorter than 4 characters are not searched');
+  check(!names.some((n) => n.side === 'response'), 'names in responses are ignored (they came from the server)');
+  const r = await P.analyze({ localFiles: [{ id: 1, name: '.env', base64: b64('KEY=1\n') }], flows: [flow(320, { req, res })] });
+  check(r.names.length === 1 && r.names[0].count === 1, 'analyze reports names');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
