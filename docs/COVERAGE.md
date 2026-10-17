@@ -41,7 +41,7 @@ WireScope는 두 경로로 트래픽을 수집한다. **프록시 경로**는 �
 | HTTPS + TLS 종단 (HTTP/1.1) | 위와 동일한 평문 + TLS 버전, cipher, ALPN | 로컬 CA를 신뢰하는 클라이언트에 한함 |
 | HTTPS + TLS 종단 (HTTP/2) | stream별 요청/응답: 의사 헤더(`:method`, `:path`, `:status`), 헤더, body, trailer, stream ID, DATA 프레임 수, RST_STREAM | 클라이언트·서버 모두 h2를 협상한 경우 |
 | HTTPS, TLS 통과 모드 | 목적지 host:port, 방향별 바이트 수, 타이밍, 암호화된 바이트 원본 | 내용은 암호문 |
-| WebSocket (HTTP/1.1 Upgrade) | 업그레이드 요청/응답은 평문, 이후 양방향 원시 바이트 | 프레임 단위 해석 없음 |
+| WebSocket (HTTP/1.1 Upgrade) | 업그레이드 요청/응답은 평문, 이후 양방향 원시 바이트. provenance 판정은 프레임 → 메시지(마스크 해제, permessage-deflate)로 풀어서 검색 | inspector 의 body 화면은 아직 원시 바이트 (메시지 목록 화면 없음) |
 | SSE (`text/event-stream`) | 이벤트 단위 분리, 이벤트 이름별 개수, 필드 경로 기준 이어붙이기 | UI 기능 (`web/app.js`) |
 | 압축 body | gzip / deflate는 화면에서 디코딩, 원본 바이트 보존 | br / zstd는 인코딩된 바이트 그대로 |
 | 실패 | 업스트림 연결 실패, TLS 검증 실패, 스트림 리셋 등을 error 기록으로 남김 | 오류 메시지 원문 보존 |
@@ -106,7 +106,7 @@ WireScope는 두 경로로 트래픽을 수집한다. **프록시 경로**는 �
 | 인증서 고정(pinning) 앱의 내용 | 로컬 CA로 서명한 인증서를 거부 | TLS 통과 모드의 바이트·타이밍, 실패 기록 |
 | 자체 trust store를 쓰고 설정 수단이 없는 앱의 내용 | 로컬 CA를 신뢰하게 만들 방법이 없음 | 동일 |
 | 프록시 설정을 따르지 않는 앱의 내용 | 명시적 프록시만 지원, 강제 리다이렉트(WFP 등) 없음 | 패킷 경로에서 바이트 수준 |
-| 비-HTTP 프로토콜의 의미 해석 | 전용 파서 없음 (WebSocket 프레임, gRPC protobuf, MQTT, IMAP 등) | 원시 바이트, TLS 위라면 레코드 수준 |
+| 비-HTTP 프로토콜의 의미 해석 | 전용 파서 없음 (gRPC protobuf, MQTT, IMAP 등). WebSocket 은 파일 추적용 해석만 | 원시 바이트, TLS 위라면 레코드 수준 |
 | h2c (평문 HTTP/2), HTTP/2 server push | 미구현 / push 비활성화 | — |
 | DNS 응답 내용, DNS over HTTPS/TLS | Answer 파서 없음 / 암호화 | 질의 이름까지만 / HTTPS·TLS 수준 |
 | 어떤 프로세스(PID)가 보낸 트래픽인지 (macOS/Linux) | 프로세스 귀속은 Windows TCP 연결 표로만 구현 | Windows 에선 연결 단위로 PID·exe·명령줄 기록. 그 외엔 세션 메타데이터를 사람이 기록 |
@@ -123,13 +123,13 @@ WireScope는 두 경로로 트래픽을 수집한다. **프록시 경로**는 �
 |---|---|---|
 | HTTP/1.1, chunked, 1.5 MiB body, TLS 종단·통과, HTTP/2 병렬 5 stream·trailer·POST, 오류 기록, `/api/files` | macOS에서 검증, Windows 러너(CI)에서 같은 테스트 | `tests/integration_test.py` (58개 검증 항목) |
 | 패킷 디코딩, pcap/pcapng, TCP 미리보기 gap, 세션 복원, 보고서 escape, 로컬 파일 스냅샷, body 한도 | macOS + Windows 러너 | `tests/core_tests.cpp` (128개 검증 항목) |
-| provenance 판정 (view·검색·canary·줄 run·fragment·바이트·중복 정리) | node 에서 검증 (macOS + Windows 러너) | `tests/provenance_test.mjs` (71개 검증 항목) |
-| 실험 키트 전체 (정답을 아는 가짜 에이전트) | macOS + Windows 러너 | `tests/experiment_dryrun_test.py` (14개 검증 항목) |
+| provenance 판정 (view·WebSocket·permessage-deflate·JSON 안의 JSON·검색·canary·이름·줄 run·fragment·바이트·중복 정리) | node 에서 검증 (macOS; Windows 러너는 머지 후 CI) | `tests/provenance_test.mjs` (115개 검증 항목) |
+| 실험 키트 전체 (정답을 아는 가짜 에이전트, `compare_runs.mjs`) | macOS (Windows 러너는 머지 후 CI) | `tests/experiment_dryrun_test.py` (16개 검증 항목) |
 | UI 화면 (목록, 상세, SSE, gzip, 비교, 패킷 hex, 오프라인 보고서) | headless Chrome으로 조작 확인 | 개발 중 스크린샷 |
 | 라이브 패킷 캡처 | **미검증** — macOS 개발 호스트에 BPF 권한 없음 | 합성 파일로만 확인 |
 | Windows 빌드 | GitHub Actions Windows 러너에서 MSVC 빌드 + 테스트 통과 | `.github/workflows/windows.yml` |
 | Npcap, loopback 캡처, Windows 인증서 저장소, 실제 Windows 데스크톱 | **미검증** | 러너에 Npcap 드라이버 없음, 대화형 신뢰 확인창 |
-| 실제 에이전트로 실험 001 | Claude Code 2.1.275 로 1회 (macOS, 2026-10-16) | [실행 1](../experiments/001-agent-file-egress/runs/2026-10-16-claude-code-2.1.275.md). 한 번의 관찰 |
+| 실제 에이전트로 실험 001 | Claude Code 2.1.275, Codex CLI 0.163.0 에 같은 과제 3개씩, 칸마다 1회 (macOS, 2026-10-16~17) | [실행 1](../experiments/001-agent-file-egress/runs/2026-10-16-claude-code-2.1.275.md), [실행 2–6](../experiments/001-agent-file-egress/runs/2026-10-17-claude-code-vs-codex.md). 칸마다 한 번의 관찰 |
 | 실제 브라우저 트래픽, 다른 AI 클라이언트, Windows 에서의 에이전트 | **미검증** | |
 | 브라우저의 프록시 설정 시 QUIC 미사용 여부 | **미검증** | §3의 일반적 동작 기술 |
 
@@ -139,7 +139,7 @@ WireScope는 두 경로로 트래픽을 수집한다. **프록시 경로**는 �
 
 | 후보 | 얻는 것 | 비고 |
 |---|---|---|
-| WebSocket 프레임 해석 | 업그레이드 이후 트래픽을 메시지 단위로 확인 | 프록시 경로의 기존 바이트에 적용 가능 |
+| WebSocket 메시지 화면 | 업그레이드 이후 트래픽을 inspector 에서 메시지 단위로 확인 | 해석은 provenance 에 이미 있음(Codex 실험 때 추가). 화면만 남음 |
 | QUIC Initial 패킷의 SNI 추출 | 프록시 없이 HTTP/3 연결 대상 확인 | Initial은 공개된 방식으로 유도한 키로 보호되어 해독 가능. QUIC 실사용 여부 확인에 직접 연결 |
 | DNS 응답 해석 | 패킷 목록의 IP를 도메인과 연결 | |
 | 메인 프록시에 SNI 기록 | TLS 통과 모드에서도 접속 대상 host 기록 | `lab/v2_tls_recorder`에 구현된 파서 이식 |

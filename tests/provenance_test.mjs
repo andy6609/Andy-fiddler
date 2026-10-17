@@ -1,7 +1,8 @@
 // Tests for web/provenance.js, run with node (no browser, no engine).
 //   node tests/provenance_test.mjs
 import { createRequire } from 'node:module';
-import { gzipSync, deflateSync } from 'node:zlib';
+import zlib, { gzipSync, deflateSync } from 'node:zlib';
+import crypto from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const P = require('../web/provenance.js');
@@ -86,12 +87,12 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   const pieces = ['int main(', 'int argc) {\n', '  return run();\n', '}\n'];
   const sse = pieces.map((t, i) => `event: content_block_delta\ndata: ${JSON.stringify({ index: 0, delta: { type: 'text_delta', text: t } })}\n\n`).join('') + 'event: ping\ndata: keepalive\n\n';
   const { views } = await P.archiveViews({ flows: [flow(30, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] });
-  const joined = views.find((v) => v.locator === 'events[*].delta.text (joined 4)');
+  const joined = views.find((v) => v.locator === 'events[*].delta.text (joined 4; index=0)');
   check(joined && joined.text === pieces.join(''), 'streamed text pieces are joined in event order');
   check(joined && joined.transforms.join() === 'sse,json,join', 'joining is recorded as a transform');
   check(views.some((v) => v.locator === 'events[1].delta.text' && v.text === 'int argc) {\n'), 'each event field is also its own view');
   check(views.some((v) => v.locator === 'events[4].data' && v.text === 'keepalive'), 'non-JSON event data is kept as text');
-  check(views.some((v) => v.locator === 'events[*].delta.type (joined 4)' && v.text === 'text_delta'.repeat(4)), 'every repeated field gets a joined view, not only text');
+  check(views.some((v) => v.locator === 'events[*].delta.type (joined 4; index=0)' && v.text === 'text_delta'.repeat(4)), 'every repeated field gets a joined view, not only text');
 }
 
 // --- base64 and binary --------------------------------------------------------
@@ -177,6 +178,11 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(r.sightings.some((x) => x.token === 'WSCANARY-png-c3' && x.flowId === 72 && x.transforms.includes('base64')), 'canary inside a base64 image is found');
   check(r.notSeen.length === 1 && r.notSeen[0].token === 'WSCANARY-env-a1', 'files whose canary never appeared are listed');
   check(r.unknown.length === 1 && r.unknown[0] === 'WSCANARY-stray-zz', 'tokens seen in traffic but in no registered file are listed');
+
+  // a tool result wrapped as JSON inside a JSON string, holding the token twice (cat + grep of the same file)
+  const wrapped = JSON.stringify({ output: JSON.stringify({ output: '// WSCANARY-config-b2\nsrc/config.ts:2:// WSCANARY-config-b2' }) });
+  const w = P.findCanaries(files, (await P.archiveViews({ flows: [flow(73, { req: wrapped })] })).views).sightings.filter((x) => x.token === 'WSCANARY-config-b2');
+  check(w.length === 1 && w[0].locator === '$.output ▸ $.output' && w[0].count === 2, 'canary in a re-parsed string: one row at the innermost view, with how many times it is there');
 }
 
 // --- line helpers ---------------------------------------------------------------------
@@ -297,6 +303,205 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(r.coverage[0].matchedAnchors === 1, 'fragments count toward coverage');
   const none = await P.analyze({ localFiles: [{ id: 1, name: 'README.md', base64: b64(readme) }], flows: [flow(121, { res: JSON.stringify({ answer: 'it has a short line in it' }) })] });
   check(!none.matches.length, 'short lines are never matched as fragments');
+}
+
+// --- raw DEFLATE (for WebSocket permessage-deflate) ------------------------------
+// Compress one message at a time on a shared stream with a sync flush, the way permessage-deflate does,
+// and drop the 00 00 ff ff tail the sender removes.
+function messageDeflater(options = {}) {
+  const z = zlib.createDeflateRaw(options);
+  return (data) => new Promise((resolve) => {
+    const chunks = [];
+    const on = (c) => chunks.push(c);
+    z.on('data', on);
+    z.write(data);
+    z.flush(zlib.constants.Z_SYNC_FLUSH, () => { z.off('data', on); const all = Buffer.concat(chunks); resolve(all.subarray(0, all.length - 4)); });
+  });
+}
+const withTail = (payload) => new Uint8Array(Buffer.concat([payload, Buffer.from([0, 0, 0xff, 0xff])]));
+{
+  const text = Buffer.from(Array.from({ length: 3000 }, (_, i) => `line ${i} of a repetitive body ${(i * 7919) % 1000}`).join('\n'));
+  const same = (input, want) => { const r = P.inflateRaw(new Uint8Array(input)); return !r.error && Buffer.from(r.bytes).equals(want); };
+  check(same(zlib.deflateRawSync(text, { level: 0 }), text), 'inflateRaw: stored blocks');
+  check(same(zlib.deflateRawSync(Buffer.from('hello hello hello'), { strategy: zlib.constants.Z_FIXED }), Buffer.from('hello hello hello')), 'inflateRaw: fixed Huffman block');
+  check(same(zlib.deflateRawSync(text, { level: 9 }), text), 'inflateRaw: dynamic Huffman blocks');
+  const random = crypto.randomBytes(50000);
+  check(same(zlib.deflateRawSync(random), random), 'inflateRaw: incompressible bytes');
+  const cut = P.inflateRaw(new Uint8Array(zlib.deflateRawSync(text).subarray(0, 300)));
+  check(cut.error === 'compressed data ended early' && cut.bytes.length > 0, 'inflateRaw: a cut stream returns what decoded and says why it stopped');
+  check(P.inflateRaw(new Uint8Array([0xff, 0xff])).error !== '', 'inflateRaw: garbage is an error, not an exception');
+
+  const deflate = messageDeflater();
+  const first = 'first message: export const timeoutMs = 15000;';
+  const second = 'second message repeats: export const timeoutMs = 15000; and more';
+  const p1 = await deflate(first), p2 = await deflate(second);
+  const r1 = P.inflateRaw(withTail(p1));
+  const r2 = P.inflateRaw(withTail(p2), r1.history);
+  check(Buffer.from(r1.bytes).toString() === first && Buffer.from(r2.bytes).toString() === second, 'inflateRaw: messages decode in order with the window carried over');
+  check(p2.length < Buffer.byteLength(second) && P.inflateRaw(withTail(p2)).error !== '', 'inflateRaw: the second message really points into the first (fails without the window)');
+}
+
+// --- WebSocket frames ---------------------------------------------------------------
+// One frame as it goes over the wire. Clients mask with a 4-byte key; servers do not mask.
+function wsFrame(payload, { opcode = 1, fin = true, rsv1 = false, mask = null } = {}) {
+  const data = Buffer.from(payload);
+  const len = data.length, m = mask ? 0x80 : 0;
+  const head = [(fin ? 0x80 : 0) | (rsv1 ? 0x40 : 0) | opcode];
+  if (len < 126) head.push(m | len);
+  else if (len < 65536) head.push(m | 126, len >> 8, len & 255);
+  else head.push(m | 127, 0, 0, 0, 0, (len >>> 24) & 255, (len >>> 16) & 255, (len >>> 8) & 255, len & 255);
+  if (!mask) return Buffer.concat([Buffer.from(head), data]);
+  return Buffer.concat([Buffer.from(head), Buffer.from(mask), Buffer.from(data.map((b, i) => b ^ mask[i & 3]))]);
+}
+const MASK = [0x37, 0xfa, 0x21, 0x3d];
+{
+  const hello = P.wsFrames(new Uint8Array(wsFrame('Hello', { mask: MASK })));
+  check(hello.frames.length === 1 && hello.frames[0].masked && Buffer.from(hello.frames[0].payload).toString() === 'Hello' && !hello.stop, 'ws: a masked client frame is unmasked');
+  const mid = 'x'.repeat(300), big = 'y'.repeat(70000);
+  const sizes = P.wsFrames(new Uint8Array(Buffer.concat([wsFrame(mid), wsFrame(big, { mask: MASK })])));
+  check(sizes.frames.length === 2 && sizes.frames[0].payload.length === 300 && sizes.frames[1].payload.length === 70000, 'ws: 16-bit and 64-bit payload lengths');
+
+  const pieces = Buffer.concat([wsFrame('first half, ', { fin: false, mask: MASK }), wsFrame('ping', { opcode: 9, mask: MASK }), wsFrame('second half', { opcode: 0, mask: MASK })]);
+  const joined = P.wsMessages(P.wsFrames(new Uint8Array(pieces)).frames);
+  check(joined.messages.length === 1 && Buffer.from(joined.messages[0].payload).toString() === 'first half, second half' && joined.messages[0].frames === 2 && joined.control === 1, 'ws: a fragmented message is joined; a ping between the pieces is counted, not merged');
+
+  const two = Buffer.concat([wsFrame('done'), wsFrame('cut off here')]);
+  const cut = P.wsFrames(new Uint8Array(two.subarray(0, two.length - 3)));
+  check(cut.frames.length === 1 && cut.stop === 'incomplete' && cut.consumed === wsFrame('done').length, 'ws: a frame cut by the capture limit stops parsing and is reported');
+  const open = P.wsMessages(P.wsFrames(new Uint8Array(wsFrame('never finished', { fin: false }))).frames);
+  check(open.messages.length === 1 && open.messages[0].complete === false, 'ws: a message whose last fragment never came is kept and marked incomplete');
+  check(/invalid frame at byte 4/.test(P.wsFrames(new Uint8Array(Buffer.concat([wsFrame('ok'), Buffer.from([0x83, 0x00])]))).stop), 'ws: a reserved opcode stops parsing where it is');
+
+  check(P.wsDeflate('permessage-deflate; client_max_window_bits=15').clientNoContext === false, 'ws: permessage-deflate without no_context_takeover keeps the window');
+  check(P.wsDeflate('permessage-deflate; server_no_context_takeover').serverNoContext === true && P.wsDeflate('') === null, 'ws: extension parameters and absence are read from the header');
+}
+
+// --- WebSocket views ------------------------------------------------------------------
+const wsFlow = (id, req, res, extensions = 'permessage-deflate') => ({
+  ...flow(id, { req, res, resHeaders: [['Upgrade', 'websocket'], ...(extensions ? [['Sec-WebSocket-Extensions', extensions]] : [])] }),
+  method: 'GET', protocol: 'WebSocket', status: 101,
+});
+{
+  const file = 'line one of the config file\nexport const timeoutMs = 15000;\nexport function clientOptions() {\n  return { baseUrl: apiBase, timeout: timeoutMs };\n}\n';
+  const client = messageDeflater(), server = messageDeflater();
+  const c0 = await client(JSON.stringify({ type: 'response.create', input: [{ role: 'user', content: 'explain src/config.ts' }] }));
+  const c1 = await client(JSON.stringify({ type: 'response.create', input: [{ type: 'function_call_output', output: file }] }));
+  const half = c1.length >> 1;
+  const req = Buffer.concat([
+    wsFrame(c0, { rsv1: true, mask: MASK }),
+    wsFrame(c1.subarray(0, half), { rsv1: true, fin: false, mask: MASK }), wsFrame('', { opcode: 9, mask: MASK }), wsFrame(c1.subarray(half), { opcode: 0, mask: MASK }),
+  ]);
+  const deltas = ['The timeout ', 'is 15 seconds.'];
+  const res = Buffer.concat([wsFrame(await server(JSON.stringify({ type: 'response.output_text.delta', delta: deltas[0] })), { rsv1: true }),
+    wsFrame(await server(JSON.stringify({ type: 'response.output_text.delta', delta: deltas[1] })), { rsv1: true })]);
+  const f = wsFlow(200, req, res);
+  const { views, notes } = await P.archiveViews({ flows: [f] });
+  check(views.some((v) => v.side === 'request' && v.locator === 'ws[1].input[0].output' && v.text === file && v.transforms.join() === 'websocket,permessage-deflate,json'),
+    'ws: a masked, compressed, fragmented client message becomes JSON views');
+  check(views.some((v) => v.side === 'request' && v.locator === 'body' && v.binary && !v.text.includes('timeoutMs')), 'ws: the raw frames stay as a binary view (masked, so the text is not visible there)');
+  check(views.some((v) => v.side === 'response' && v.locator.startsWith('ws[*].delta') && v.text === deltas.join('') && v.transforms.includes('join')), 'ws: server deltas are joined across messages');
+  check(!notes.length, `ws: a clean stream leaves no notes (${JSON.stringify(notes)})`);
+  const r = await P.analyze({ localFiles: [{ id: 1, name: 'src/config.ts', base64: b64(file) }], flows: [f] });
+  check(r.matches.some((m) => m.kind === 'lines' && m.flowId === 200 && m.side === 'request' && m.fileFrom === 1 && m.fileTo === 5 && m.locator === 'ws[1].input[0].output'),
+    'ws: file lines are found inside a WebSocket message, at its JSON path');
+
+  // client_no_context_takeover: every client message is compressed on its own
+  const own = (s) => { const z = zlib.deflateRawSync(Buffer.from(s), { finishFlush: zlib.constants.Z_SYNC_FLUSH }); return z.subarray(0, z.length - 4); };
+  const solo = wsFlow(201, Buffer.concat([wsFrame(own('repeat repeat repeat'), { rsv1: true, mask: MASK }), wsFrame(own('repeat repeat repeat again'), { rsv1: true, mask: MASK })]), '',
+    'permessage-deflate; client_no_context_takeover');
+  const soloViews = (await P.archiveViews({ flows: [solo] })).views;
+  check(soloViews.some((v) => v.locator === 'ws[1]' && v.text === 'repeat repeat repeat again'), 'ws: client_no_context_takeover decodes each message with a fresh window');
+
+  // a broken message: later ones depend on its window, so decoding stops and says so
+  const broken = wsFlow(202, Buffer.concat([wsFrame(c0, { rsv1: true, mask: MASK }), wsFrame(Buffer.from([0xff, 0xff, 0xff]), { rsv1: true, mask: MASK }), wsFrame(c1, { rsv1: true, mask: MASK })]), '');
+  const b = await P.archiveViews({ flows: [broken] });
+  check(b.notes.some((n) => /message 1: permessage-deflate stopped .*later messages were not decoded/.test(n.note)) && !b.views.some((v) => v.locator.startsWith('ws[2]')),
+    'ws: a decode error stops decoding that direction and is reported');
+
+  const plain = wsFlow(203, wsFrame(c0, { rsv1: true, mask: MASK }), '', '');
+  check((await P.archiveViews({ flows: [plain] })).notes.some((n) => /compressed but permessage-deflate was not negotiated/.test(n.note)), 'ws: a compressed frame without the extension is reported, not guessed');
+  const cut = wsFlow(204, Buffer.concat([wsFrame('{"type":"a","text":"first message"}', { mask: MASK }), wsFrame('second message, cut', { mask: MASK }).subarray(0, 10)]), '', '');
+  const cv = await P.archiveViews({ flows: [cut] });
+  check(cv.views.some((v) => v.locator === 'ws[0].text') && cv.notes.some((n) => /last frame is incomplete/.test(n.note)), 'ws: messages before a cut frame are decoded, the cut is reported');
+}
+
+// --- JSON inside JSON strings -----------------------------------------------------
+{
+  const inner = { path: 'src/a.ts', content: 'first line of a\nsecond line of a' };
+  const body = JSON.stringify({ arguments: JSON.stringify(inner) });
+  const { views } = await P.archiveViews({ flows: [flow(300, { req: body, reqHeaders: [['Content-Type', 'application/json']] })] });
+  const nested = views.find((v) => v.locator === '$.arguments ▸ $.content');
+  check(nested && nested.text === inner.content && nested.transforms.join() === 'json,json', 'a JSON string that is JSON is parsed again (tool-call arguments)');
+  check(views.some((v) => v.locator === '$.arguments' && v.text === JSON.stringify(inner)), 'the outer string stays as its own view');
+
+  const four = JSON.stringify({ a: JSON.stringify({ b: JSON.stringify({ c: JSON.stringify({ d: 'deepest string here' }) }) }) });
+  const deep = (await P.archiveViews({ flows: [flow(301, { req: four })] })).views;
+  check(deep.some((v) => v.locator === '$.a ▸ $.b ▸ $.c') && !deep.some((v) => v.locator.endsWith('▸ $.d')), 'strings are parsed again at most twice');
+  check(!(await P.archiveViews({ flows: [flow(302, { req: JSON.stringify({ n: '[not json' }) })] })).views.some((v) => v.locator.includes('▸')), 'a string that only looks like JSON stays a string');
+
+  // Anthropic streams tool input as delta.partial_json pieces; only the joined text is JSON
+  const toolInput = JSON.stringify({ file_path: 'src/b.ts', content: 'alpha line of file b\nbeta line of file b\n' });
+  const parts = [toolInput.slice(0, 15), toolInput.slice(15, 50), toolInput.slice(50)];
+  const sse = parts.map((t) => `event: content_block_delta\ndata: ${JSON.stringify({ index: 1, delta: { type: 'input_json_delta', partial_json: t } })}\n\n`).join('');
+  const sv = (await P.archiveViews({ flows: [flow(303, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] })).views;
+  const joinedInput = sv.find((v) => v.locator.startsWith('events[*].delta.partial_json') && v.locator.endsWith('▸ $.content'));
+  check(joinedInput && joinedInput.text === 'alpha line of file b\nbeta line of file b\n' && joinedInput.transforms.join() === 'sse,json,join,json', 'joined partial_json is parsed into the tool input fields');
+  const r = await P.analyze({ localFiles: [{ id: 1, name: 'src/b.ts', base64: b64('alpha line of file b\nbeta line of file b\n') }], flows: [flow(303, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] });
+  check(r.matches.some((m) => m.kind === 'lines' && m.fileFrom === 1 && m.fileTo === 2 && m.locator.endsWith('▸ $.content')), 'file lines written by a streamed tool call are matched');
+}
+
+// --- joined streams are grouped -------------------------------------------------------
+{
+  // OpenAI Responses: text and tool-call input both arrive as `delta`, separated only by type and item_id
+  const args = JSON.stringify({ cmd: 'cat src/c.ts' });
+  const events = [
+    { type: 'response.output_text.delta', item_id: 'msg_1', delta: 'Let me look ' },
+    { type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: args.slice(0, 9) },
+    { type: 'response.output_text.delta', item_id: 'msg_1', delta: 'at the file.' },
+    { type: 'response.function_call_arguments.delta', item_id: 'fc_1', delta: args.slice(9) },
+  ];
+  const sse = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
+  const { views } = await P.archiveViews({ flows: [flow(310, { res: sse, resHeaders: [['Content-Type', 'text/event-stream']] })] });
+  const text = views.find((v) => v.locator === 'events[*].delta (joined 2; type=response.output_text.delta, item_id=msg_1)');
+  const call = views.find((v) => v.locator === 'events[*].delta (joined 2; type=response.function_call_arguments.delta, item_id=fc_1) ▸ $.cmd');
+  check(text && text.text === 'Let me look at the file.', 'joined text stays separate from tool-call input sent in the same field');
+  check(call && call.text === 'cat src/c.ts', 'joined tool-call arguments are their own stream and parse as JSON');
+  check(!views.some((v) => v.locator === 'events[*].delta (joined 4)'), 'no join mixes the two streams');
+}
+
+// --- file names --------------------------------------------------------------------
+{
+  const files = P.prepareFiles([
+    { id: 1, name: '.env', base64: b64('KEY=1\n') },
+    { id: 2, name: 'src/config.ts', base64: b64('export const A = 1;\n') },
+    { id: 3, name: 'src/a.c', base64: b64('int a;\n') },
+  ]);
+  const ls = '-rw-r--r--  1 me  staff  144 Oct 16 .env\ndrwxr-xr-x  5 me  staff  160 Oct 16 src\n';
+  const req = JSON.stringify({ messages: [
+    { role: 'user', content: [{ type: 'tool_result', content: ls }] },
+    { role: 'user', content: 'see .env.example, dotenv and /home/me/repo/src/config.ts; listing: config.ts\na.c' },
+  ] });
+  const res = JSON.stringify({ text: 'I read .env and src/config.ts' });
+  const { views } = await P.archiveViews({ flows: [flow(320, { req, res })] });
+  const names = P.findNames(files, views);
+  const env = names.filter((n) => n.fileId === 1);
+  check(env.length === 1 && env[0].locator === '$.messages[0].content[0].content' && env[0].excerpt.match === '.env', 'a file name in an ls listing is found, at its JSON path');
+  check(!names.some((n) => n.fileId === 1 && n.locator === '$.messages[1].content'), '.env inside .env.example or dotenv is not counted');
+  check(names.some((n) => n.fileId === 2 && n.form === 'path' && n.locator === '$.messages[1].content'), 'an absolute path ending in the relative path counts as the path');
+  check(names.some((n) => n.fileId === 2 && n.form === 'name' && n.locator === '$.messages[1].content'), 'the bare base name counts as the name');
+  check(!names.filter((n) => n.fileId === 2 && n.form === 'name').some((n) => n.excerpt.before.endsWith('src/')), 'a base name that is part of the relative path is not counted twice');
+  check(!names.some((n) => n.fileId === 3 && n.form === 'name'), 'base names shorter than 4 characters are not searched');
+  check(!names.some((n) => n.side === 'response'), 'names in responses are ignored (they came from the server)');
+  const r = await P.analyze({ localFiles: [{ id: 1, name: '.env', base64: b64('KEY=1\n') }], flows: [flow(320, { req, res })] });
+  check(r.names.length === 1 && r.names[0].count === 1, 'analyze reports names');
+}
+
+// --- search keeps the most specific view ------------------------------------------
+{
+  const req = JSON.stringify({ output: JSON.stringify({ output: 'exit 0\nexport const timeoutMs = 15000;' }) });
+  const { views } = await P.archiveViews({ flows: [flow(330, { req })] });
+  const r = P.search(views, 'timeoutMs = 15000');
+  check(r.hits.length === 1 && r.hits[0].locator === '$.output ▸ $.output', 'search reports text inside a re-parsed string once, at the innermost view');
 }
 
 // --- end of sections ----------------------------------------------------------

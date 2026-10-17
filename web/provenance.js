@@ -78,6 +78,192 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Raw DEFLATE (RFC 1951), for WebSocket permessage-deflate
+  // ---------------------------------------------------------------------------
+
+  // permessage-deflate (RFC 7692) keeps one LZ77 window per direction across messages by default, so message N
+  // can copy bytes from message N-1. DecompressionStream cannot be fed one message at a time and asked what came out
+  // for it, so this small synchronous decoder keeps the window by hand. Same algorithm as zlib's puff.c: Huffman codes
+  // are decoded bit by bit, which is slow but simple, and the bodies here are kilobytes to a few megabytes.
+  const LEN_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  const LEN_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+  const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+  const CODE_LENGTH_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+  const WINDOW = 32768;
+
+  // Canonical Huffman code from code lengths: how many codes of each length, and the symbols in code order.
+  function huffman(lengths) {
+    const count = new Uint16Array(16), offs = new Uint16Array(16), symbol = new Uint16Array(lengths.length);
+    for (const l of lengths) count[l]++;
+    count[0] = 0;
+    for (let l = 1; l < 15; l++) offs[l + 1] = offs[l] + count[l];
+    for (let s = 0; s < lengths.length; s++) if (lengths[s]) symbol[offs[lengths[s]]++] = s;
+    return { count, symbol };
+  }
+  let fixedCodes = null;
+  function fixed() {
+    if (!fixedCodes) {
+      const l = new Uint8Array(288);
+      l.fill(8, 0, 144); l.fill(9, 144, 256); l.fill(7, 256, 280); l.fill(8, 280, 288);
+      fixedCodes = { lit: huffman(l), dist: huffman(new Uint8Array(30).fill(5)) };
+    }
+    return fixedCodes;
+  }
+
+  // Decodes `input` with `history` (the previous output, up to 32 KiB) as the starting window.
+  // Returns { bytes, history, error }: what was decoded (also when it stopped on an error) and the window to carry on.
+  // The input ends either at a final block or, for permessage-deflate, right after an empty stored block (sync flush).
+  function inflateRaw(input, history = new Uint8Array(0)) {
+    let out = new Uint8Array(Math.max(1024, history.length + input.length * 4));
+    out.set(history);
+    const start = history.length;
+    let o = start, pos = 0, bitbuf = 0, bitcnt = 0, error = '';
+    const put = (b) => {
+      if (o === out.length) { const grown = new Uint8Array(out.length * 2); grown.set(out); out = grown; }
+      out[o++] = b;
+    };
+    const bits = (n) => {
+      let v = bitbuf;
+      while (bitcnt < n) {
+        if (pos >= input.length) throw new Error('compressed data ended early');
+        v |= input[pos++] << bitcnt;
+        bitcnt += 8;
+      }
+      bitbuf = v >>> n;
+      bitcnt -= n;
+      return v & ((1 << n) - 1);
+    };
+    const decode = (h) => {
+      let code = 0, first = 0, index = 0;
+      for (let len = 1; len < 16; len++) {
+        code |= bits(1);
+        const count = h.count[len];
+        if (code - count < first) return h.symbol[index + (code - first)];
+        index += count; first += count; first <<= 1; code <<= 1;
+      }
+      throw new Error('invalid Huffman code');
+    };
+    const codes = (lit, dist) => {
+      for (;;) {
+        let sym = decode(lit);
+        if (sym < 256) { put(sym); continue; }
+        if (sym === 256) return;
+        sym -= 257;
+        if (sym >= 29) throw new Error('invalid length code');
+        const len = LEN_BASE[sym] + bits(LEN_EXTRA[sym]);
+        const ds = decode(dist);
+        if (ds >= 30) throw new Error('invalid distance code');
+        const d = DIST_BASE[ds] + bits(DIST_EXTRA[ds]);
+        if (d > o) throw new Error('distance reaches before the start of the window');
+        for (let k = 0; k < len; k++) put(out[o - d]);
+      }
+    };
+    const stored = () => {
+      bitbuf = 0; bitcnt = 0;
+      if (pos + 4 > input.length) throw new Error('compressed data ended early');
+      const len = input[pos] | (input[pos + 1] << 8), nlen = input[pos + 2] | (input[pos + 3] << 8);
+      pos += 4;
+      if (len !== (~nlen & 0xffff)) throw new Error('stored block length check failed');
+      if (pos + len > input.length) throw new Error('compressed data ended early');
+      for (let k = 0; k < len; k++) put(input[pos++]);
+    };
+    const dynamic = () => {
+      const nlen = bits(5) + 257, ndist = bits(5) + 1, ncode = bits(4) + 4;
+      if (nlen > 286 || ndist > 30) throw new Error('too many length or distance codes');
+      const cl = new Uint8Array(19);
+      for (let i = 0; i < ncode; i++) cl[CODE_LENGTH_ORDER[i]] = bits(3);
+      const clCode = huffman(cl);
+      const lengths = new Uint8Array(nlen + ndist);
+      for (let i = 0; i < nlen + ndist;) {
+        const sym = decode(clCode);
+        if (sym < 16) { lengths[i++] = sym; continue; }
+        let len = 0, rep;
+        if (sym === 16) { if (!i) throw new Error('repeat with no previous length'); len = lengths[i - 1]; rep = 3 + bits(2); }
+        else if (sym === 17) rep = 3 + bits(3);
+        else rep = 11 + bits(7);
+        if (i + rep > nlen + ndist) throw new Error('too many code lengths');
+        while (rep--) lengths[i++] = len;
+      }
+      if (!lengths[256]) throw new Error('no end-of-block code');
+      codes(huffman(lengths.subarray(0, nlen)), huffman(lengths.subarray(nlen)));
+    };
+    try {
+      for (let last = 0; !last;) {
+        if (pos >= input.length && bitcnt === 0) break;   // ended after a sync flush, not a final block
+        last = bits(1);
+        const type = bits(2);
+        if (type === 0) stored();
+        else if (type === 1) codes(fixed().lit, fixed().dist);
+        else if (type === 2) dynamic();
+        else throw new Error('invalid block type');
+      }
+    } catch (e) { error = e.message || String(e); }
+    return { bytes: out.slice(start, o), history: out.slice(Math.max(0, o - WINDOW), o), error };
+  }
+
+  // ---------------------------------------------------------------------------
+  // WebSocket frames (RFC 6455)
+  // ---------------------------------------------------------------------------
+
+  // After a 101 upgrade the proxy records each direction's bytes as they went over the wire: a stream of frames.
+  // Client-to-server frames are XOR-masked, so file contents are invisible in the raw body until the mask is removed.
+  // Parsing stops at the first thing that is not a valid frame and says where, instead of guessing.
+  function wsFrames(bytes) {
+    const frames = [];
+    let p = 0, stop = '';
+    while (p < bytes.length) {
+      if (p + 2 > bytes.length) { stop = 'incomplete'; break; }
+      const b0 = bytes[p], b1 = bytes[p + 1], opcode = b0 & 0x0f;
+      let len = b1 & 0x7f, head = 2;
+      if (len === 126) { if (p + 4 > bytes.length) { stop = 'incomplete'; break; } len = (bytes[p + 2] << 8) | bytes[p + 3]; head = 4; }
+      else if (len === 127) { if (p + 10 > bytes.length) { stop = 'incomplete'; break; } len = 0; for (let k = 2; k < 10; k++) len = len * 256 + bytes[p + k]; head = 10; }
+      const control = opcode >= 8;
+      if ((b0 & 0x30) || ![0, 1, 2, 8, 9, 10].includes(opcode) || (control && (len > 125 || !(b0 & 0x80)))) { stop = `invalid frame at byte ${p}`; break; }
+      const masked = (b1 & 0x80) !== 0, keyAt = p + head;
+      if (masked) head += 4;
+      if (p + head + len > bytes.length) { stop = 'incomplete'; break; }
+      const payload = bytes.slice(p + head, p + head + len);
+      if (masked) for (let k = 0; k < payload.length; k++) payload[k] ^= bytes[keyAt + (k & 3)];
+      frames.push({ fin: (b0 & 0x80) !== 0, rsv1: (b0 & 0x40) !== 0, opcode, masked, payload, offset: p });
+      p += head + len;
+    }
+    return { frames, stop, consumed: p };
+  }
+
+  // Frames -> messages. A message is a text/binary frame plus its continuation frames; control frames (ping, pong,
+  // close) may sit between the pieces and are counted, not merged. Per RFC 7692 only the first frame carries RSV1.
+  function wsMessages(frames) {
+    const messages = [];
+    let cur = null, control = 0, orphans = 0;
+    const finish = (m, complete) => {
+      const size = m.parts.reduce((n, x) => n + x.length, 0);
+      const payload = new Uint8Array(size);
+      let o = 0;
+      for (const x of m.parts) { payload.set(x, o); o += x.length; }
+      messages.push({ opcode: m.opcode, compressed: m.compressed, payload, frames: m.parts.length, offset: m.offset, complete });
+    };
+    for (const f of frames) {
+      if (f.opcode >= 8) { control++; continue; }
+      if (f.opcode !== 0) {
+        if (cur) finish(cur, false);          // a new message started before the last one finished
+        cur = { opcode: f.opcode, compressed: f.rsv1, parts: [f.payload], offset: f.offset };
+      } else if (cur) cur.parts.push(f.payload);
+      else { orphans++; continue; }
+      if (f.fin) { finish(cur, true); cur = null; }
+    }
+    if (cur) finish(cur, false);              // cut by the capture limit or the end of the connection
+    return { messages, control, orphans };
+  }
+
+  // Sec-WebSocket-Extensions as accepted by the server, e.g. "permessage-deflate; client_max_window_bits=15".
+  function wsDeflate(value) {
+    const ext = String(value || '').split(',').map((x) => x.trim()).find((x) => /^permessage-deflate\b/i.test(x));
+    if (!ext) return null;
+    return { serverNoContext: /server_no_context_takeover/i.test(ext), clientNoContext: /client_no_context_takeover/i.test(ext) };
+  }
+
+  // ---------------------------------------------------------------------------
   // Views of one body
   // ---------------------------------------------------------------------------
 
@@ -92,6 +278,23 @@
     return out;
   }
   function tryJson(text) { try { return { ok: true, value: JSON.parse(text) }; } catch { return { ok: false }; } }
+
+  // A JSON string that is itself JSON (tool-call arguments, a tool result wrapped as {"output": "..."}) is parsed
+  // again, up to two levels, so the text inside is unescaped too. The locator shows both paths: `$.arguments ▸ $.content`.
+  const NESTED_DEPTH = 2;
+  function jsonViews(flow, side, loc, transforms, value, depth = 0) {
+    const views = [];
+    const strings = jsonStrings(value, '$', []);
+    for (const [path, s] of strings) {
+      views.push(makeView(flow, side, loc(path), [...transforms, 'json'], s));
+      const inner = depth < NESTED_DEPTH && /^\s*[[{]/.test(s) ? tryJson(s) : null;
+      if (inner && inner.ok && inner.value && typeof inner.value === 'object') {
+        views.push(...jsonViews(flow, side, (p) => `${loc(path)} ▸ ${p}`, [...transforms, 'json'], inner.value, depth + 1));
+      }
+    }
+    views.push(...base64Views(flow, side, transforms, strings, loc));
+    return views;
+  }
 
   // Server-sent events: a streamed reply arrives in many small events. Each event's data is a view, and
   // the same JSON field across events is also joined in order (e.g. every delta.text), because text a
@@ -117,30 +320,99 @@
   }
   const looksLikeSse = (contentType, text) => /event-stream/i.test(contentType) || /^(event|data|id):/m.test(text.slice(0, 200));
 
-  function sseViews(flow, side, transforms, text) {
+  // Joining is per stream of related events: same `type` and, when present, the same block or item. OpenAI's
+  // Responses API sends output text and tool-call input both as `delta`, told apart only by type and item_id;
+  // joined together they would be neither.
+  const GROUP_KEYS = ['type', 'index', 'output_index', 'content_index', 'item_id'];
+  function groupOf(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { key: '', label: '' };
+    const parts = GROUP_KEYS.filter((k) => typeof value[k] === 'string' || typeof value[k] === 'number').map((k) => [k, String(value[k])]);
+    return { key: parts.map(([k, v]) => `${k}=${v}`).join(','), label: parts.map(([k, v]) => `${k}=${k === 'item_id' && v.length > 24 ? `${v.slice(0, 12)}…` : v}`).join(', ') };   // long opaque ids shortened for display only
+  }
+
+  // A stream of events (SSE events, WebSocket messages). Each item becomes views of its own, and the same JSON
+  // field across related items is also joined in order.
+  //   items: [{ text, transforms }] or [{ bytes, binary: true, transforms }]
+  //   prefix: locator of the stream ('events', 'ws'); rawSuffix: added for a non-JSON item ('.data' for SSE)
+  function eventViews(flow, side, items, { prefix, rawSuffix = '', joinTransforms }) {
     const views = [];
-    const joined = new Map();   // json path -> pieces in event order
-    parseSse(text).forEach((ev, i) => {
-      const parsed = tryJson(ev.data);
+    const joined = new Map();   // group + json path -> { path, label, pieces in item order }
+    items.forEach((item, i) => {
+      if (item.binary) { views.push(bytesView(flow, side, `${prefix}[${i}]`, item.transforms, item.bytes)); return; }
+      const parsed = tryJson(item.text);
       if (!parsed.ok) {
-        if (ev.data.length >= MIN_STRING) views.push(makeView(flow, side, `events[${i}].data`, [...transforms, 'sse'], ev.data));
+        if (item.text.length >= MIN_STRING) views.push(makeView(flow, side, `${prefix}[${i}]${rawSuffix}`, item.transforms, item.text));
         return;
       }
-      for (const [path, value] of jsonStrings(parsed.value, '$', [])) {
-        views.push(makeView(flow, side, `events[${i}]${path.slice(1)}`, [...transforms, 'sse', 'json'], value));
-      }
+      views.push(...jsonViews(flow, side, (path) => `${prefix}[${i}]${path.slice(1)}`, item.transforms, parsed.value));
       // short pieces are exactly what joining is for, so collect them without the length floor
+      const group = groupOf(parsed.value);
       (function walk(v, path) {
-        if (typeof v === 'string') { if (!joined.has(path)) joined.set(path, []); joined.get(path).push(v); }
+        if (typeof v === 'string') {
+          const k = `${group.key}\u0000${path}`;
+          if (!joined.has(k)) joined.set(k, { path, label: group.label, pieces: [] });
+          joined.get(k).pieces.push(v);
+        }
         else if (Array.isArray(v)) v.forEach((x, k) => walk(x, `${path}[${k}]`));
         else if (v && typeof v === 'object') for (const k of Object.keys(v)) walk(v[k], path + keyPath(k));
       })(parsed.value, '$');
     });
-    for (const [path, pieces] of joined) {
+    for (const { path, label, pieces } of joined.values()) {
       if (pieces.length < 2) continue;
-      views.push(makeView(flow, side, `events[*]${path.slice(1)} (joined ${pieces.length})`, [...transforms, 'sse', 'json', 'join'], pieces.join('')));
+      const loc = `${prefix}[*]${path.slice(1)} (joined ${pieces.length}${label ? `; ${label}` : ''})`;
+      const text = pieces.join('');
+      views.push(makeView(flow, side, loc, [...joinTransforms, 'json', 'join'], text));
+      // streamed tool input (Anthropic delta.partial_json, OpenAI arguments deltas) is JSON only once joined
+      const inner = /^\s*[[{]/.test(text) ? tryJson(text) : null;
+      if (inner && inner.ok && inner.value && typeof inner.value === 'object') views.push(...jsonViews(flow, side, (p) => `${loc} ▸ ${p}`, [...joinTransforms, 'json', 'join'], inner.value, 1));
     }
     return views;
+  }
+
+  // WebSocket: one direction's recorded frames -> messages -> permessage-deflate inflated with that direction's window
+  // (RFC 7692: only compressed messages feed it) -> each message treated like an event. A decode error on a complete
+  // message leaves the window wrong for every later message, so decoding stops there and says so.
+  function wsViews(flow, side, bytes, notes) {
+    const note = (text) => notes.push({ flowId: flow.id, side, note: text });
+    const { frames, stop, consumed } = wsFrames(bytes);
+    if (stop === 'incomplete') note(`WebSocket: the last frame is incomplete after byte ${consumed} (capture limit or connection end)`);
+    else if (stop) note(`WebSocket: ${stop}; the ${bytes.length - consumed} bytes from there were not decoded`);
+    const { messages, orphans } = wsMessages(frames);
+    if (orphans) note(`WebSocket: ${orphans} continuation frame(s) without a first frame were skipped`);
+    const deflate = wsDeflate(headerValue((flow.response || {}).headers, 'sec-websocket-extensions'));
+    const fresh = deflate && (side === 'request' ? deflate.clientNoContext : deflate.serverNoContext);
+    let history = new Uint8Array(0);
+    const items = [];
+    for (const [i, m] of messages.entries()) {
+      const transforms = ['websocket'];
+      let payload = m.payload, stopHere = false;
+      if (m.compressed) {
+        if (!deflate) { note(`WebSocket message ${i} is compressed but permessage-deflate was not negotiated; it and later messages were not decoded`); break; }
+        const input = new Uint8Array(payload.length + 4);
+        input.set(payload);
+        input.set([0, 0, 0xff, 0xff], payload.length);
+        const r = inflateRaw(input, fresh ? new Uint8Array(0) : history);
+        history = r.history;
+        if (r.error && m.complete) {
+          note(`WebSocket message ${i}: permessage-deflate stopped after ${r.bytes.length} bytes (${r.error})${fresh ? '' : '; later messages were not decoded'}`);
+          stopHere = !fresh;
+        }
+        payload = r.bytes;
+        transforms.push('permessage-deflate');
+      }
+      if (!m.complete) note(`WebSocket message ${i} is incomplete; only what was captured is searched`);
+      items.push(m.opcode === 2 || !isMostlyText(payload) ? { bytes: payload, binary: true, transforms } : { text: decodeText(payload), transforms });
+      if (stopHere) break;
+    }
+    const compressed = items.some((x) => x.transforms.includes('permessage-deflate'));
+    return eventViews(flow, side, items, { prefix: 'ws', joinTransforms: compressed ? ['websocket', 'permessage-deflate'] : ['websocket'] });
+  }
+  const isWebSocket = (flow) => flow.protocol === 'WebSocket' || (Number(flow.status) === 101 && /websocket/i.test(headerValue((flow.request || {}).headers, 'upgrade')));
+
+  // Server-sent events: each event's data is one item.
+  function sseViews(flow, side, transforms, text) {
+    const items = parseSse(text).map((ev) => ({ text: ev.data, transforms: [...transforms, 'sse'] }));
+    return eventViews(flow, side, items, { prefix: 'events', rawSuffix: '.data', joinTransforms: [...transforms, 'sse'] });
   }
 
   // multipart/form-data: the classic upload form (claude.ai used plain multipart in the internship captures).
@@ -198,14 +470,14 @@
   // Attachments often ride inside JSON as base64 (images, documents, "file_data" fields).
   // Only long strings made purely of the base64 alphabet are tried, so ordinary text is left alone.
   const BASE64_MIN = 64;
-  function base64Views(flow, side, transforms, strings) {
+  function base64Views(flow, side, transforms, strings, loc = (p) => p) {
     const out = [];
     for (const [path, value] of strings) {
       const v = value.startsWith('data:') && value.includes(';base64,') ? value.slice(value.indexOf(';base64,') + 8) : value;
       if (v.length < BASE64_MIN || v.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(v)) continue;
       let bytes;
       try { bytes = b64ToBytes(v); } catch { continue; }
-      out.push(bytesView(flow, side, path, [...transforms, 'json', 'base64'], bytes));
+      out.push(bytesView(flow, side, loc(path), [...transforms, 'json', 'base64'], bytes));
     }
     return out;
   }
@@ -217,6 +489,8 @@
     const bytes = b64ToBytes(body.base64);
     if (!bytes.length) return [];
     if (body.truncated) notes.push({ flowId: flow.id, side, note: `only the first ${body.captured} of ${body.total} bytes were captured` });
+    // After an upgrade the body is a stream of WebSocket frames, not an HTTP body (no Content-Encoding applies).
+    if (isWebSocket(flow)) return [makeView(flow, side, 'body', [], latin1(bytes), true), ...wsViews(flow, side, bytes, notes)];
     // Undo Content-Encoding first; everything below works on the decoded bytes.
     let base = bytes;
     const transforms = [];
@@ -240,9 +514,7 @@
     views.unshift(makeView(flow, side, 'body', transforms, text));
     const parsed = tryJson(text);
     if (parsed.ok) {
-      const strings = jsonStrings(parsed.value, '$', []);
-      for (const [path, value] of strings) views.push(makeView(flow, side, path, [...transforms, 'json'], value));
-      views.push(...base64Views(flow, side, transforms, strings));
+      views.push(...jsonViews(flow, side, (path) => path, transforms, parsed.value));
     } else if (looksLikeSse(headerValue(msg.headers, 'content-type'), text)) {
       views.push(...sseViews(flow, side, transforms, text));
     }
@@ -283,8 +555,14 @@
       }
       if (hits.length >= limit) { truncated = true; break; }
     }
-    const derived = new Set(hits.filter((h) => h.locator !== 'body').map((h) => `${h.flowId}/${h.side}`));
-    return { hits: hits.filter((h) => h.locator !== 'body' || !derived.has(`${h.flowId}/${h.side}`)), truncated };
+    // the same rules as for canaries: drop the raw body, a joined stream and an outer string when a more specific view
+    // of the same body also has the text (offsets differ between views, so rows are not merged further)
+    const body = (h) => `${h.flowId}/${h.side}`;
+    const decoded = new Set(hits.filter((h) => h.locator !== 'body').map(body));
+    const unjoined = new Set(hits.filter((h) => h.locator !== 'body' && !h.transforms.includes('join')).map(body));
+    const nested = new Set(hits.filter((h) => h.locator.includes(' ▸ ')).map((h) => `${body(h)}/${h.locator.slice(0, h.locator.lastIndexOf(' ▸ '))}`));
+    const keep = (h) => !(h.locator === 'body' && decoded.has(body(h))) && !(h.transforms.includes('join') && unjoined.has(body(h))) && !nested.has(`${body(h)}/${h.locator}`);
+    return { hits: hits.filter(keep), truncated };
   }
 
   // Up to 60 characters of context on each side; binary views show bytes as hex around the match.
@@ -314,6 +592,28 @@
   const CANARY = /WSCANARY-[A-Za-z0-9_-]{2,64}/g;
   const lineAt = (text, offset) => { let n = 1; for (let i = text.indexOf('\n'); i >= 0 && i < offset; i = text.indexOf('\n', i + 1)) n++; return n; };
 
+  // The same occurrence is visible in several views of one body: the raw body, a JSON string, that string parsed
+  // again (`… ▸ $.output`), a joined stream. Keep the most specific view, and one row per view with a count
+  // (a tool result can legitimately hold the same thing twice, e.g. `cat` and `grep` output of one file).
+  // `group(x)` names what counts as "the same thing in the same body".
+  function collapse(sightings, group) {
+    const decoded = new Set(sightings.filter((x) => x.locator !== 'body').map(group));
+    const unjoined = new Set(sightings.filter((x) => x.locator !== 'body' && !x.transforms.includes('join')).map(group));
+    const locators = new Map();
+    for (const x of sightings) { if (!locators.has(group(x))) locators.set(group(x), new Set()); locators.get(group(x)).add(x.locator); }
+    const rows = new Map();
+    for (const x of sightings) {
+      const k = group(x);
+      if (x.locator === 'body' && decoded.has(k)) continue;
+      if (x.transforms.includes('join') && unjoined.has(k)) continue;
+      if ([...locators.get(k)].some((l) => l.startsWith(`${x.locator} ▸ `))) continue;
+      const row = `${k}/${x.locator}`;
+      if (rows.has(row)) rows.get(row).count++;
+      else rows.set(row, { ...x, count: 1 });
+    }
+    return [...rows.values()];
+  }
+
   function findCanaries(files, views, pattern = CANARY) {
     const origin = new Map();                 // token -> [{fileId, fileName, line}]
     for (const f of files) {
@@ -332,12 +632,42 @@
         seen.add(token);
       }
     }
-    // collapse the same token found in the raw body and in a decoded view of the same body
-    const derived = new Set(sightings.filter((x) => x.locator !== 'body').map((x) => `${x.token}/${x.flowId}/${x.side}`));
-    const unique = sightings.filter((x) => x.locator !== 'body' || !derived.has(`${x.token}/${x.flowId}/${x.side}`));
+    const unique = collapse(sightings, (x) => `${x.token}/${x.flowId}/${x.side}`);
     const notSeen = [...origin].filter(([token]) => !seen.has(token)).map(([token, from]) => ({ token, from }));
     const unknown = [...new Set(unique.filter((x) => !x.from.length).map((x) => x.token))];
     return { sightings: unique, notSeen, unknown };
+  }
+
+  // File names. A tool result such as `ls -la`, or a prompt that says "fix src/config.ts", sends names and not
+  // contents, so neither canaries nor line runs see it. Look for each registered file's relative path and, when it
+  // is distinctive enough (4+ characters), its base name, as a whole name: not part of a longer word or name
+  // (`.env` inside `.env.example` or `dotenv` does not count). An absolute path ending in the relative path counts.
+  // Requests only: a name in a response came from the server (a plugin catalog mentions `.env` and `README.md`
+  // dozens of times), not from this machine. A common name can still appear in a request for unrelated reasons,
+  // which is why every row keeps its context.
+  const NAME_BEFORE = /[A-Za-z0-9_.-]/;
+  const NAME_AFTER = /^(?:[A-Za-z0-9_-]|\.[A-Za-z0-9])/;
+  function findNames(files, views) {
+    const targets = [];
+    for (const f of files) {
+      targets.push({ fileId: f.id, fileName: f.name, form: 'path', needle: f.name });
+      const base = f.name.split('/').pop();
+      if (base !== f.name && base.length >= 4) targets.push({ fileId: f.id, fileName: f.name, form: 'name', needle: base });
+    }
+    const sightings = [];
+    for (const v of views) {
+      if (v.binary || v.side !== 'request') continue;
+      for (const t of targets) {
+        for (let at = v.text.indexOf(t.needle); at >= 0; at = v.text.indexOf(t.needle, at + 1)) {
+          const end = at + t.needle.length;
+          if ((at && NAME_BEFORE.test(v.text[at - 1])) || NAME_AFTER.test(v.text.slice(end, end + 2))) continue;
+          // a base name preceded by its own directory is the relative path, already counted
+          if (t.form === 'name' && v.text.slice(Math.max(0, end - t.fileName.length), end) === t.fileName) continue;
+          sightings.push({ fileId: t.fileId, fileName: t.fileName, form: t.form, name: t.needle, flowId: v.flowId, side: v.side, locator: v.locator, transforms: v.transforms, offset: at, excerpt: excerpt(v, at, t.needle.length) });
+        }
+      }
+    }
+    return collapse(sightings, (x) => `${x.fileId}/${x.form}/${x.flowId}/${x.side}`).sort((a, b) => a.flowId - b.flowId || a.fileId - b.fileId);
   }
 
   // ---------------------------------------------------------------------------
@@ -525,6 +855,7 @@
       viewCount: views.length,
       matches,
       canaries: findCanaries(files, views),
+      names: findNames(files, views),
       coverage: coverageList,
       notes,
       bodyLimit: archive.bodyLimit || null,
@@ -532,5 +863,5 @@
     };
   }
 
-  return { analyze, byteRuns, lineRuns, fragments, coverage, splitLines, isTrivial, prepareFiles, findCanaries, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
+  return { inflateRaw, wsFrames, wsMessages, wsDeflate, analyze, byteRuns, lineRuns, fragments, coverage, splitLines, isTrivial, prepareFiles, findCanaries, findNames, search, b64ToBytes, decodeText, isMostlyText, headerValue, decompress, jsonStrings, parseSse, latin1, bodyViews, archiveViews };
 });

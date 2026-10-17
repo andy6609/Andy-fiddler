@@ -65,19 +65,31 @@ Here, lines 1–8 of `src/config.ts` were inside request #3, in `$.messages[2].c
 
 How it matches, in short:
 - **Canaries.** Plant a random `WSCANARY-…` token in each file. If it shows up in a request, there's no other place those bytes could have come from.
-- **Runs of lines.** Consecutive file lines that appear as consecutive lines of a body, after undoing gzip, JSON escaping, SSE framing, base64 and multipart. Lines like `}` or `return;` can't start a match on their own, since every file has them.
+- **Runs of lines.** Consecutive file lines that appear as consecutive lines of a body, after undoing gzip, JSON escaping, SSE framing, WebSocket framing and permessage-deflate, base64 and multipart, and JSON that sits inside a JSON string (tool results often come wrapped twice). Lines like `}` or `return;` can't start a match on their own, since every file has them.
 - **Bytes** for binary files (the whole file, or the longest prefix of an upload cut short), and long lines quoted inside other text.
+- **Names.** A registered file's path or name inside a request, such as an `ls` listing that mentions `.env`, even when its contents never left.
 - One match per body and file range, at the most specific location.
 
 What it proves is narrow on purpose: *these bytes were inside this captured request*. It doesn't say which process read the file, and "not seen" only means not seen in what the proxy captured. Both sentences are on the screen next to the results. The details are in [docs/PROVENANCE.md](docs/PROVENANCE.md), and [experiments/001-agent-file-egress](experiments/001-agent-file-egress) has a kit for running the same task through several coding agents: a sandbox repo with canaries, a runner that records one agent, and a fake agent with a known ground truth to check the whole thing.
+
+## What two coding agents actually sent
+
+I gave Claude Code 2.1.275 and Codex CLI 0.163.0 the same three tasks in a fresh canary repository each time, one run per task, on macOS. From the [write-up](experiments/001-agent-file-egress/runs/2026-10-17-claude-code-vs-codex.md):
+
+- Asked to explain the project structure, both sent most text files in full (`docs/design.md` 42 of 42 lines, `src/main.cpp` 25 of 25).
+- Asked why the database connection fails, Claude Code read `.env` with its Read tool, and the fake API key and DB URL went out in the next request. Codex ran `rg … -g '!.env'`, excluding the file by name, so not even its name was sent.
+- Neither resent the whole conversation each turn. Claude Code continues a server-side thread, and Codex keeps one WebSocket open and refers to the previous response.
+- File contents showed up only in model requests, not in the telemetry either tool sent.
+
+One run per cell isn't a pattern. It's what happened that time, with the exact requests to back it up. Getting there needed changes to the tool itself: Codex talks to its model over a compressed WebSocket, which WireScope recorded as opaque bytes until I added frame and permessage-deflate decoding.
 
 ## What it can and can't see
 
 | | |
 |---|---|
 | **Full content** | HTTP/1.x and HTTP/2: method, headers (in original order), bodies, streams, trailers, timing. HTTPS too, if the client trusts the local CA |
-| **Structure and bytes** | TCP, UDP, ICMP, ARP and IPv4/IPv6 header fields; DNS queries; TLS record types; pass-through TLS tunnels; WebSocket traffic after the upgrade; anything from apps that ignore proxy settings |
-| **Your files in requests** | Which lines (or bytes) of a registered local file were inside which captured body, and which planted canaries never showed up |
+| **Structure and bytes** | TCP, UDP, ICMP, ARP and IPv4/IPv6 header fields; DNS queries; TLS record types; pass-through TLS tunnels; WebSocket frames after the upgrade (decoded into messages for file tracing); anything from apps that ignore proxy settings |
+| **Your files in requests** | Which lines (or bytes) of a registered local file were inside which captured body, which planted canaries never showed up, and where a file's name was sent |
 | **Not visible** | QUIC/HTTP3 payloads, apps that pin certificates, the meaning of non-HTTP protocols, which process *read* a file, content that was summarized or rewritten before it left, the sending process outside Windows |
 
 The full breakdown is in [docs/COVERAGE.md](docs/COVERAGE.md) (in Korean for now). It covers what needs special setup, storage limits, and why each blind spot exists.
@@ -140,11 +152,11 @@ Windows is the real target. It builds with MSVC and the whole test suite runs on
 
 | | |
 |---|---|
-| macOS dev host: build, unit tests (128 assertions), end-to-end tests (58 assertions against local HTTP, HTTPS and HTTP/2 servers), provenance tests in node (71), experiment-kit dry run with a fake agent (14), lab v1–v11 smoke tests (94) | passing, 2026-10-16 |
+| macOS dev host: build, unit tests (128 assertions), end-to-end tests (58 assertions against local HTTP, HTTPS and HTTP/2 servers), provenance tests in node (115), experiment-kit dry run with a fake agent (16), lab v1–v11 smoke tests (94) | passing, 2026-10-16 |
 | Windows runner (Server 2025, MSVC `/W4` with 0 warnings): the same unit, end-to-end, provenance, experiment dry-run and lab tests, plus 35 Windows-only checks (process attribution against real PIDs, system proxy on/off/crash recovery, Korean `--data` path) | passing, 2026-10-16 — see [docs/WINDOWS.md](docs/WINDOWS.md) |
 | UI driven in headless Chrome: list, detail, SSE, gzip, compare, packet hex, offline report, process column, find in bodies, local files → requests, adding and removing files | no JS errors |
 | Npcap live capture, Windows certificate store install, a real Windows 10/11 desktop | **not verified yet** |
-| Real coding agents | **one run**: Claude Code 2.1.275 on macOS ([results](experiments/001-agent-file-egress/runs/2026-10-16-claude-code-2.1.275.md)). Other agents, and anything on Windows, not yet |
+| Real coding agents | Claude Code 2.1.275 and Codex CLI 0.163.0, three tasks each, one run per task, macOS ([results](experiments/001-agent-file-egress/runs/2026-10-17-claude-code-vs-codex.md)). Other agents and Windows: out of scope for now |
 
 ## Finding your way around
 

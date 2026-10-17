@@ -24,7 +24,7 @@ WireScope 는 원래 요청에서 출발해 연결·패킷·바이트로 내려�
 | 화면 | 하는 일 |
 |---|---|
 | Find in bodies | 모든 body 를 해석된 상태(gzip·JSON·SSE·base64·multipart 해제 후)로 문자열 검색. 결과마다 JSON 경로와 변환을 표시 |
-| Local files → requests | 등록한 로컬 파일마다 커버리지(본 줄 수), 일치 목록(파일 구간 → 요청·위치·변환), canary 표(본 것 / 못 본 것 / 출처 모름) |
+| Local files → requests | 등록한 로컬 파일마다 커버리지(본 줄 수), 일치 목록(파일 구간 → 요청·위치·변환), canary 표(본 것 / 못 본 것 / 출처 모름), 요청에 나간 파일 이름 |
 
 ---
 
@@ -62,6 +62,21 @@ WireScope 는 원래 요청에서 출발해 연결·패킷·바이트로 내려�
 | `multipart` | multipart/form-data 파트 하나 | `part[1] name="file" filename="a.png"` |
 | `form` | urlencoded 필드 하나 | `form.note` |
 | `line-numbers` | 파일 읽기 도구의 줄번호 접두어 제거 (일치 단계에서 붙음) | — |
+| `websocket` | WebSocket 메시지 하나 (프레임 합치기, 클라이언트 마스크 해제) | `ws[3].input[0].output[1].text` |
+| `permessage-deflate` | WebSocket 압축 해제. 방향마다 32 KiB 창을 메시지 사이에 이어 씀 | (websocket 뒤에 붙음) |
+| `json` 두 번 | JSON 문자열이 그 자체로 JSON 이면 다시 품 (최대 두 번) | `$.arguments ▸ $.content` |
+
+이어붙이기(`join`)는 이벤트 **그룹별**이다: 최상위 `type`, `index`, `output_index`, `content_index`, `item_id` 가 같은 이벤트끼리만.
+OpenAI Responses 는 출력 텍스트와 도구 입력을 둘 다 `delta` 로 보내서, 그룹 없이 붙이면 섞인다. 위치에 그룹이 표시된다:
+`events[*].delta.text (joined 4; index=0)`. 이어붙인 결과가 JSON 이면(Anthropic `partial_json`, OpenAI 도구 인자) 그것도 다시 푼다.
+
+### WebSocket
+
+101 로 업그레이드된 연결은 방향마다 프레임이 그대로 body 에 기록된다. 클라이언트 프레임은 XOR 마스크가 걸려 있어 원본 view 에서는 글자가 안 보인다.
+view 를 만들 때 프레임 → 메시지(조각 합치기, ping/close 는 세기만) → permessage-deflate(서버가 받아들인 `Sec-WebSocket-Extensions` 를 보고,
+`*_no_context_takeover` 면 메시지마다 새 창) → 메시지마다 이벤트처럼 JSON 경로 view.
+`DecompressionStream` 은 메시지 단위로 "이 메시지에서 나온 것"을 돌려주지 못해서 raw DEFLATE 해제기를 직접 넣었다(`inflateRaw`, zlib 의 puff.c 와 같은 방식).
+압축 해제가 중간에 깨지면 그 방향의 뒤 메시지는 창이 틀어져 풀지 않고 note 로 남긴다. 잘린 프레임, 협상 없이 온 압축 프레임도 note.
 
 바이너리 view 는 바이트를 latin1 문자열로 들고 있어서 바이트 그대로 `indexOf` 할 수 있다.
 
@@ -75,8 +90,10 @@ WireScope 는 원래 요청에서 출발해 연결·패킷·바이트로 내려�
 | lines | 파일의 연속된 줄이 view 의 연속된 줄로 나옴 | 줄은 앞뒤 공백 무시. 사소한 줄(짧거나 괄호뿐)은 run 을 이어 줄 뿐 시작 못 함. 의미 있는 줄 2개 이상, 또는 40자+ 의미 있는 줄 1개. run 끝의 빈 줄은 포함 안 함 |
 | fragment | 40자+ 고유한 파일 줄이 다른 줄 안에 인용됨 | 같은 body 의 lines 일치가 이미 그 줄을 덮으면 생략 |
 | bytes | 바이너리 파일 | 파일 바이트 전체가 그대로 / 아니면 4 KiB 단위 최장 앞부분(잘린 업로드) |
+| name | 파일 **이름**이 요청에 있음 (`ls` 출력, 프롬프트, 도구 인자) | 상대 경로, 그리고 4자 이상이면 기본 이름. 더 긴 이름의 일부(`.env.example`, `dotenv`)는 제외, 절대 경로 끝의 상대 경로는 포함. **요청만** — 응답의 이름은 서버가 보낸 것(플러그인 목록이 `.env` 를 수십 번 말한다). 흔한 이름은 무관한 이유로도 나오므로 행마다 문맥을 보여준다 |
 
 **중복 정리.** 같은 파일 구간이 한 body 의 여러 view 에서 보이면(원문 body, 이어붙인 스트림, 이벤트 자체) 하나만 남긴다. 우선순위는 구체적인 경로 > join > 원문 body.
+canary·이름·Find in bodies 도 같은 규칙이고, 여기에 "바깥 문자열보다 다시 푼 안쪽(`▸`)"이 더해진다. 같은 view 에 여러 번 있으면 한 줄 + 횟수(`2×`).
 
 **커버리지.** 파일의 의미 있는 줄 중 어떤 일치(lines/fragment)에든 포함된 줄의 비율. 바이너리 파일은 찾은 최장 바이트 / 파일 크기.
 
@@ -114,13 +131,14 @@ WireScope 는 원래 요청에서 출발해 연결·패킷·바이트로 내려�
 
 | 테스트 | 내용 |
 |---|---|
-| `tests/provenance_test.mjs` (node) | view 종류별(gzip·잘린 gzip·br·JSON·SSE·join·base64·data URL·multipart·form), 검색, canary, 줄 run(부분 읽기·재들여쓰기·사소한 줄·긴 줄·잘린 끝), 바이너리, fragment, 중복 정리, analyze 종단 |
+| `tests/provenance_test.mjs` (node, 115개) | view 종류별(gzip·잘린 gzip·br·JSON·SSE·join·base64·data URL·multipart·form), raw DEFLATE(저장/고정/동적 블록, 창 이어받기), WebSocket(마스크, 16/64비트 길이, 조각, 잘림, 협상 없는 압축, no_context_takeover, 깨진 압축), JSON 안의 JSON, 그룹별 이어붙이기, 이름, 검색, canary, 줄 run, 바이너리, fragment, 중복 정리, analyze 종단 |
 | `tests/core_tests.cpp` | 스냅샷 저장·한도·archive 왕복·예전 archive 호환·redact 제외, body 한도 변경 |
 | `tests/integration_test.py` | `/api/files`, redacted 보고서에 스냅샷 없음, 보고서에 provenance.js 인라인 |
-| `tests/experiment_dryrun_test.py` | 정답을 아는 가짜 에이전트로 실험 키트 전체: 보낸 줄만 정확히, 안 보낸 canary 는 안 보임, 이전 턴 재전송도 보임 |
+| `tests/experiment_dryrun_test.py` (16개) | 정답을 아는 가짜 에이전트로 실험 키트 전체: 보낸 줄만 정확히, 안 보낸 canary 는 안 보임, 이전 턴 재전송도 보임, `compare_runs.mjs` |
 | headless Chrome | Find in bodies, Local files → requests, inspector, 파일 추가/삭제, 오프라인·redacted 보고서 |
 
-실제 에이전트는 Claude Code 2.1.275 로 한 번 돌렸다 ([실행 1](../experiments/001-agent-file-egress/runs/2026-10-16-claude-code-2.1.275.md)). 가짜 에이전트와 달리 이전 턴을 다시 보내지 않았고(`thread: continue`), 응답 SSE 의 도구 입력(`partial_json`)을 이어붙인 view 가 JSON 으로 다시 풀리지 않는 한계가 드러났다.
+실제 에이전트: Claude Code 2.1.275 와 Codex CLI 0.163.0 에 같은 과제 3개씩 ([실행 1](../experiments/001-agent-file-egress/runs/2026-10-16-claude-code-2.1.275.md), [실행 2–6](../experiments/001-agent-file-egress/runs/2026-10-17-claude-code-vs-codex.md)).
+실행에서 드러난 것을 고쳤다: 응답 SSE 의 `partial_json` 이 JSON 으로 안 풀림, 파일 이름 노출을 못 셈, Codex 의 대화가 WebSocket(permessage-deflate) 안에 있어 아무것도 안 보임, 도구 결과가 JSON 문자열 안의 JSON 이라 줄이 안 나뉨.
 
 ---
 
@@ -130,6 +148,8 @@ WireScope 는 원래 요청에서 출발해 연결·패킷·바이트로 내려�
 - **의미 단위 비교 없음.** 요약·번역·재작성된 내용은 못 찾는다. 줄과 바이트가 그대로 남은 경우만 다룬다. "비슷하다"를 판정하는 순간 판단 문장이 생기기 때문에 일부러 피했다.
 - **배열 순서 기반 run.** 파일 줄이 다른 순서로 재배열돼서 나가면 짧은 run 여러 개로 보인다.
 - **br / zstd 미해제.** 브라우저 API 가 지원하지 않는다. note 로 표시한다.
-- **WebSocket·HTTP/3 body 는 대상 아님.** 프록시가 메시지 단위로 기록하지 않거나 볼 수 없는 경로다.
+- **HTTP/3 은 대상 아님.** 프록시가 볼 수 없는 경로다. WebSocket 은 HTTP/1.1 업그레이드만 (HTTP/2 extended CONNECT 위 WebSocket 은 아님).
+- **세션이 크면 무겁다.** Codex 실행 하나가 view 24만 개, node 에서 약 1.6초·620 MB (대부분 25 MB 의 플러그인 목록 응답). 브라우저에서도 같은 코드가 돈다.
+- **이름은 요청만, 흔한 이름은 오탐 가능.** `README.md` 같은 이름은 그 파일과 무관하게 나올 수 있다 — 문맥을 보고 판단한다.
 EOF
 git add docs/PROVENANCE.md && git commit -q -m "docs: PROVENANCE.md — 로컬 파일 → 요청 추적의 흐름, view 와 변환 표, 일치 종류·규칙·중복 정리·커버리지, 증명하는 것/못 하는 것, 스냅샷과 개인정보, 검증, 일부러 안 한 것" && git log --oneline -1
