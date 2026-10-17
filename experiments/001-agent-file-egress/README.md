@@ -1,13 +1,14 @@
 # 실험 001 — 코딩 에이전트가 작업할 때, 로컬 파일의 어느 부분이 네트워크로 나가는가
 
-> 상태: 가짜 에이전트(`fake_agent.py`)로 절차를 검증했고, **실제 에이전트는 Claude Code 2.1.275 로 한 번** 돌렸다 (macOS, 2026-10-16).
-> 다른 에이전트(Codex CLI, Gemini CLI 등)와 Windows 는 아직.
+> 상태: 가짜 에이전트(`fake_agent.py`)로 절차를 검증했고, **실제 에이전트 두 개(Claude Code 2.1.275, Codex CLI 0.163.0)에 같은 과제 3개씩** 돌렸다 (macOS, 2026-10-16~17, 칸마다 한 번).
+> 다른 에이전트(Gemini CLI 등)와 Windows 는 아직. 범위는 여기까지로 정했다.
 
 ## 실행 기록
 
 | 실행 | 에이전트 | 한 줄 요약 (관찰) |
 |---|---|---|
 | [실행 1](runs/2026-10-16-claude-code-2.1.275.md) | Claude Code 2.1.275, macOS | `src/config.ts` 는 Read 결과로 한 번 통째로(줄번호 포함), grep 결과로 두 줄 더. 다른 파일 내용·canary 는 캡처 안에서 안 보임. 파일 이름은 `ls` 출력으로 나감. 대화는 `thread: continue` 로 새 tool_result 만 전송 |
+| [실행 2–6](runs/2026-10-17-claude-code-vs-codex.md) | Claude Code 2.1.275 · Codex CLI 0.163.0, 과제 3개 | 구조 설명(t2)에서는 둘 다 텍스트 파일 대부분을 통째로. DB 원인 찾기(t3)에서 Claude Code 는 `.env` 를 Read 로 읽어 내용이 나갔고, Codex 는 `rg … -g '!.env'` 로 `.env` 를 빼서 이름도 안 나감. Codex 의 대화는 WebSocket 하나(permessage-deflate) |
 
 ## 질문
 
@@ -51,7 +52,8 @@ python3 experiments/001-agent-file-egress/run_agent.py \
   -- claude -p "{task}"
 
 # 3. 같은 sandbox(새로 만든 것) 와 같은 task 로 다른 에이전트도
-# 4. 결과 비교: 각 results/<label>/summary.txt, 그리고 inspector 에서 session.wscope 열기
+# 4. 결과 비교: 각 results/<label>/summary.txt, inspector 에서 session.wscope 열기, 그리고 파일별 표
+node experiments/001-agent-file-egress/compare_runs.mjs results/001-*
 ```
 
 `run_agent.py` 가 하는 일: 엔진 시작(body 한도 8 MiB) → 프록시(TLS 종단) → 세션 메타데이터(label, task) → sandbox 파일 전부를 로컬 파일로 등록 → 에이전트를 sandbox 안에서 **그 프로세스에만** 프록시/CA 환경 변수를 줘서 실행 → 끝나면 `session.wscope`, `report.html`, `summary.txt` 저장.
