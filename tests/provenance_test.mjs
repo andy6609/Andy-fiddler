@@ -371,6 +371,55 @@ const MASK = [0x37, 0xfa, 0x21, 0x3d];
   check(P.wsDeflate('permessage-deflate; server_no_context_takeover').serverNoContext === true && P.wsDeflate('') === null, 'ws: extension parameters and absence are read from the header');
 }
 
+// --- WebSocket views ------------------------------------------------------------------
+const wsFlow = (id, req, res, extensions = 'permessage-deflate') => ({
+  ...flow(id, { req, res, resHeaders: [['Upgrade', 'websocket'], ...(extensions ? [['Sec-WebSocket-Extensions', extensions]] : [])] }),
+  method: 'GET', protocol: 'WebSocket', status: 101,
+});
+{
+  const file = 'line one of the config file\nexport const timeoutMs = 15000;\nexport function clientOptions() {\n  return { baseUrl: apiBase, timeout: timeoutMs };\n}\n';
+  const client = messageDeflater(), server = messageDeflater();
+  const c0 = await client(JSON.stringify({ type: 'response.create', input: [{ role: 'user', content: 'explain src/config.ts' }] }));
+  const c1 = await client(JSON.stringify({ type: 'response.create', input: [{ type: 'function_call_output', output: file }] }));
+  const half = c1.length >> 1;
+  const req = Buffer.concat([
+    wsFrame(c0, { rsv1: true, mask: MASK }),
+    wsFrame(c1.subarray(0, half), { rsv1: true, fin: false, mask: MASK }), wsFrame('', { opcode: 9, mask: MASK }), wsFrame(c1.subarray(half), { opcode: 0, mask: MASK }),
+  ]);
+  const deltas = ['The timeout ', 'is 15 seconds.'];
+  const res = Buffer.concat([wsFrame(await server(JSON.stringify({ type: 'response.output_text.delta', delta: deltas[0] })), { rsv1: true }),
+    wsFrame(await server(JSON.stringify({ type: 'response.output_text.delta', delta: deltas[1] })), { rsv1: true })]);
+  const f = wsFlow(200, req, res);
+  const { views, notes } = await P.archiveViews({ flows: [f] });
+  check(views.some((v) => v.side === 'request' && v.locator === 'ws[1].input[0].output' && v.text === file && v.transforms.join() === 'websocket,permessage-deflate,json'),
+    'ws: a masked, compressed, fragmented client message becomes JSON views');
+  check(views.some((v) => v.side === 'request' && v.locator === 'body' && v.binary && !v.text.includes('timeoutMs')), 'ws: the raw frames stay as a binary view (masked, so the text is not visible there)');
+  check(views.some((v) => v.side === 'response' && v.locator.startsWith('ws[*].delta') && v.text === deltas.join('') && v.transforms.includes('join')), 'ws: server deltas are joined across messages');
+  check(!notes.length, `ws: a clean stream leaves no notes (${JSON.stringify(notes)})`);
+  const r = await P.analyze({ localFiles: [{ id: 1, name: 'src/config.ts', base64: b64(file) }], flows: [f] });
+  check(r.matches.some((m) => m.kind === 'lines' && m.flowId === 200 && m.side === 'request' && m.fileFrom === 1 && m.fileTo === 5 && m.locator === 'ws[1].input[0].output'),
+    'ws: file lines are found inside a WebSocket message, at its JSON path');
+
+  // client_no_context_takeover: every client message is compressed on its own
+  const own = (s) => { const z = zlib.deflateRawSync(Buffer.from(s), { finishFlush: zlib.constants.Z_SYNC_FLUSH }); return z.subarray(0, z.length - 4); };
+  const solo = wsFlow(201, Buffer.concat([wsFrame(own('repeat repeat repeat'), { rsv1: true, mask: MASK }), wsFrame(own('repeat repeat repeat again'), { rsv1: true, mask: MASK })]), '',
+    'permessage-deflate; client_no_context_takeover');
+  const soloViews = (await P.archiveViews({ flows: [solo] })).views;
+  check(soloViews.some((v) => v.locator === 'ws[1]' && v.text === 'repeat repeat repeat again'), 'ws: client_no_context_takeover decodes each message with a fresh window');
+
+  // a broken message: later ones depend on its window, so decoding stops and says so
+  const broken = wsFlow(202, Buffer.concat([wsFrame(c0, { rsv1: true, mask: MASK }), wsFrame(Buffer.from([0xff, 0xff, 0xff]), { rsv1: true, mask: MASK }), wsFrame(c1, { rsv1: true, mask: MASK })]), '');
+  const b = await P.archiveViews({ flows: [broken] });
+  check(b.notes.some((n) => /message 1: permessage-deflate stopped .*later messages were not decoded/.test(n.note)) && !b.views.some((v) => v.locator.startsWith('ws[2]')),
+    'ws: a decode error stops decoding that direction and is reported');
+
+  const plain = wsFlow(203, wsFrame(c0, { rsv1: true, mask: MASK }), '', '');
+  check((await P.archiveViews({ flows: [plain] })).notes.some((n) => /compressed but permessage-deflate was not negotiated/.test(n.note)), 'ws: a compressed frame without the extension is reported, not guessed');
+  const cut = wsFlow(204, Buffer.concat([wsFrame('{"type":"a","text":"first message"}', { mask: MASK }), wsFrame('second message, cut', { mask: MASK }).subarray(0, 10)]), '', '');
+  const cv = await P.archiveViews({ flows: [cut] });
+  check(cv.views.some((v) => v.locator === 'ws[0].text') && cv.notes.some((n) => /last frame is incomplete/.test(n.note)), 'ws: messages before a cut frame are decoded, the cut is reported');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);

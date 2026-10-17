@@ -334,6 +334,46 @@
     return views;
   }
 
+  // WebSocket: one direction's recorded frames -> messages -> permessage-deflate inflated with that direction's window
+  // (RFC 7692: only compressed messages feed it) -> each message treated like an event. A decode error on a complete
+  // message leaves the window wrong for every later message, so decoding stops there and says so.
+  function wsViews(flow, side, bytes, notes) {
+    const note = (text) => notes.push({ flowId: flow.id, side, note: text });
+    const { frames, stop, consumed } = wsFrames(bytes);
+    if (stop === 'incomplete') note(`WebSocket: the last frame is incomplete after byte ${consumed} (capture limit or connection end)`);
+    else if (stop) note(`WebSocket: ${stop}; the ${bytes.length - consumed} bytes from there were not decoded`);
+    const { messages, orphans } = wsMessages(frames);
+    if (orphans) note(`WebSocket: ${orphans} continuation frame(s) without a first frame were skipped`);
+    const deflate = wsDeflate(headerValue((flow.response || {}).headers, 'sec-websocket-extensions'));
+    const fresh = deflate && (side === 'request' ? deflate.clientNoContext : deflate.serverNoContext);
+    let history = new Uint8Array(0);
+    const items = [];
+    for (const [i, m] of messages.entries()) {
+      const transforms = ['websocket'];
+      let payload = m.payload, stopHere = false;
+      if (m.compressed) {
+        if (!deflate) { note(`WebSocket message ${i} is compressed but permessage-deflate was not negotiated; it and later messages were not decoded`); break; }
+        const input = new Uint8Array(payload.length + 4);
+        input.set(payload);
+        input.set([0, 0, 0xff, 0xff], payload.length);
+        const r = inflateRaw(input, fresh ? new Uint8Array(0) : history);
+        history = r.history;
+        if (r.error && m.complete) {
+          note(`WebSocket message ${i}: permessage-deflate stopped after ${r.bytes.length} bytes (${r.error})${fresh ? '' : '; later messages were not decoded'}`);
+          stopHere = !fresh;
+        }
+        payload = r.bytes;
+        transforms.push('permessage-deflate');
+      }
+      if (!m.complete) note(`WebSocket message ${i} is incomplete; only what was captured is searched`);
+      items.push(m.opcode === 2 || !isMostlyText(payload) ? { bytes: payload, binary: true, transforms } : { text: decodeText(payload), transforms });
+      if (stopHere) break;
+    }
+    const compressed = items.some((x) => x.transforms.includes('permessage-deflate'));
+    return eventViews(flow, side, items, { prefix: 'ws', joinTransforms: compressed ? ['websocket', 'permessage-deflate'] : ['websocket'] });
+  }
+  const isWebSocket = (flow) => flow.protocol === 'WebSocket' || (Number(flow.status) === 101 && /websocket/i.test(headerValue((flow.request || {}).headers, 'upgrade')));
+
   // Server-sent events: each event's data is one item.
   function sseViews(flow, side, transforms, text) {
     const items = parseSse(text).map((ev) => ({ text: ev.data, transforms: [...transforms, 'sse'] }));
@@ -414,6 +454,8 @@
     const bytes = b64ToBytes(body.base64);
     if (!bytes.length) return [];
     if (body.truncated) notes.push({ flowId: flow.id, side, note: `only the first ${body.captured} of ${body.total} bytes were captured` });
+    // After an upgrade the body is a stream of WebSocket frames, not an HTTP body (no Content-Encoding applies).
+    if (isWebSocket(flow)) return [makeView(flow, side, 'body', [], latin1(bytes), true), ...wsViews(flow, side, bytes, notes)];
     // Undo Content-Encoding first; everything below works on the decoded bytes.
     let base = bytes;
     const transforms = [];
