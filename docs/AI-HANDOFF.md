@@ -113,7 +113,7 @@ Windows에서 네트워크를 직접 관찰하고 증명하는 C++ 도구. 프�
 | `experiments/001-agent-file-egress/` | 실험 절차, `make_sandbox.py`(canary 저장소), `run_agent.py`(에이전트 하나 기록), `fake_agent.py`(정답 아는 가짜), `compare_runs.mjs`(파일별 비교표) | `tests/experiment_dryrun_test.py` 16개. 실제 에이전트: Claude Code·Codex 각 3회 (`runs/`) |
 | `src/process.cpp` | accept 직후 `GetExtendedTcpTable` 로 연결 → PID, exe/경로/명령줄/부모 | Windows 러너: 직접 띄운 curl/python 의 PID·경로·명령줄·부모와 일치 |
 | `src/sysproxy.cpp` | WinINET 시스템 프록시 켜기/복원, 백업 파일, 비정상 종료 감지 | Windows 러너: 레지스트리 반영, 프록시 인자 없는 Python urllib 가 따라옴, 4가지 복원 경로 |
-| `tests/core_tests.cpp` | 소켓 없는 단위 테스트 (128개) | 통과 (macOS, Windows 러너 run 38881207226) |
+| `tests/core_tests.cpp` | 소켓 없는 단위 테스트 (128개) | 통과 (macOS, Windows 러너 run 39009605418) |
 | `tests/integration_test.py` | curl → WireScope → 로컬 HTTP·HTTPS·nghttpd(h2) 서버, 58개 검사(`/api/files`, provenance.js 인라인 포함). nghttpd 가 없으면 `tests/h2_server.py` | 통과 (macOS) |
 | `tests/windows_test.py` | 프로세스 귀속, 시스템 프록시(CI 에서만), 한글 `--data` 경로 | Windows 러너 |
 | `third_party/` | cpp-httplib, nlohmann/json 단일 헤더와 LICENSE | — |

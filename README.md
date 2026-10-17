@@ -153,7 +153,7 @@ Windows is the real target. It builds with MSVC and the whole test suite runs on
 | | |
 |---|---|
 | macOS dev host: build, unit tests (128 assertions), end-to-end tests (58 assertions against local HTTP, HTTPS and HTTP/2 servers), provenance tests in node (115), experiment-kit dry run with a fake agent (16), lab v1–v11 smoke tests (94) | passing, 2026-10-16 |
-| Windows runner (Server 2025, MSVC `/W4` with 0 warnings): the same unit, end-to-end, provenance, experiment dry-run and lab tests, plus 35 Windows-only checks (process attribution against real PIDs, system proxy on/off/crash recovery, Korean `--data` path) | passing, 2026-10-16 — see [docs/WINDOWS.md](docs/WINDOWS.md) |
+| Windows runner (Server 2025, MSVC `/W4` with 0 warnings): the same unit, end-to-end, provenance, experiment dry-run and lab tests, plus 35 Windows-only checks (process attribution against real PIDs, system proxy on/off/crash recovery, Korean `--data` path) | passing, 2026-10-17 — see [docs/WINDOWS.md](docs/WINDOWS.md) |
 | UI driven in headless Chrome: list, detail, SSE, gzip, compare, packet hex, offline report, process column, find in bodies, local files → requests, adding and removing files | no JS errors |
 | Npcap live capture, Windows certificate store install, a real Windows 10/11 desktop | **not verified yet** |
 | Real coding agents | Claude Code 2.1.275 and Codex CLI 0.163.0, three tasks each, one run per task, macOS ([results](experiments/001-agent-file-egress/runs/2026-10-17-claude-code-vs-codex.md)). Other agents and Windows: out of scope for now |

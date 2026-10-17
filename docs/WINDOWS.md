@@ -73,7 +73,7 @@ CI 가 만든 zip 은 각 실행의 Artifacts(`WireScope-windows-x64`)에도 있
 환경: GitHub Actions `windows-latest` = Windows Server 2025 Datacenter 10.0.26100, MSVC (VS 2022), vcpkg OpenSSL 3 + nghttp2,
 Python 3.12 + h2, curl.se 공식 Windows curl(LibreSSL + nghttp2). 러너는 관리자 권한, Npcap 없음.
 
-기준 실행: [run 38881207226](https://github.com/andy6609/Andy-fiddler/actions/runs/38881207226) (커밋 `bd2ce28`, provenance 머지 + 12·13번 수정 후, 2026-10-16) — **6개 테스트 모두 통과**.
+기준 실행: [run 39009605418](https://github.com/andy6609/Andy-fiddler/actions/runs/39009605418) (커밋 `8d02c20`, 실제 에이전트 측정 작업 머지 후, 2026-10-17) — **6개 테스트 모두 통과**. 그 전 기준: [run 38881207226](https://github.com/andy6609/Andy-fiddler/actions/runs/38881207226) (`bd2ce28`).
 아래 표의 숫자는 그 실행의 annotation(로그인 없이 실행 페이지에서 보임)에 남은 원자료다. 그 아래 `windows`·`integration` 원자료 블록은
 처음 기준 실행 [run 38759644492](https://github.com/andy6609/Andy-fiddler/actions/runs/38759644492) (`c5255df`)에서 옮긴 것이다 (같은 테스트, PID·포트만 실행마다 다름).
 
@@ -81,9 +81,9 @@ Python 3.12 + h2, curl.se 공식 Windows curl(LibreSSL + nghttp2). 러너는 관
 |---|---|---|
 | MSVC 빌드 `/W4` | 오류 0, 경고 0 | 본체, lab v1~v5·v7~v11, 단위 테스트 (v6 은 Npcap SDK 가 없어 빌드에서 빠짐) |
 | `core` (단위) | 128 checks, 0 failures | 인코딩, 패킷 해석, pcap/pcapng, 세션 저장/복원, 보고서, 프로세스 기록의 목록 축약·redact, 로컬 파일 스냅샷, body 한도 |
-| `provenance` (node) | 71 checks, 0 failures | body view(gzip·JSON·SSE·base64·multipart·form), 검색, canary, 줄 run, fragment, 바이트 일치 |
+| `provenance` (node) | 115 checks, 0 failures | body view(gzip·JSON·JSON 안의 JSON·SSE·WebSocket·permessage-deflate·base64·multipart·form), raw DEFLATE, 검색, canary, 이름, 줄 run, fragment, 바이트 일치 |
 | `integration` | 58 ok, 0 FAIL | curl → WireScope → 로컬 HTTP / HTTPS(MITM) / HTTP/2(Python h2 서버, 5개 병렬 스트림, trailer) / passthrough / 거부된 upstream / 내보내기·가져오기 / `/api/files` |
-| `experiment001` | 14 ok, 0 FAIL | 실험 키트 전체를 가짜 에이전트로: 보낸 줄만 정확히, 안 보낸 canary 는 안 보임, summary.txt 가 UTF-8 |
+| `experiment001` | 16 ok, 0 FAIL | 실험 키트 전체를 가짜 에이전트로: 보낸 줄만 정확히, 안 보낸 canary 는 안 보임, summary.txt 가 UTF-8, `compare_runs.mjs` |
 | `lab` | 94 ok, 0 FAIL | lab v1~v11 스모크 (v6 은 빌드에서 빠져 건너뜀) |
 | `windows` | 35 ok, 0 FAIL | 아래 원자료 |
 | `scripts/build-windows.ps1 -Package` | 성공 | zip: `WireScope.exe`, `libssl-3-x64.dll`, `libcrypto-3-x64.dll`, `nghttp2.dll`, `web\index.html`, `app.css`, `app.js` |
