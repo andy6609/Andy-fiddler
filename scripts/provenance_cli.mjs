@@ -70,7 +70,7 @@ console.log('\nMATCHES');
 if (!r.matches.length) console.log('  none');
 for (const m of r.matches) console.log(`  ${m.fileName} ${part(m)}  ->  ${where(m)}  at ${m.locator}  [${m.transforms.join(' ') || 'as captured'}]`);
 console.log('\nCANARIES');
-for (const x of r.canaries.sightings) console.log(`  seen      ${x.token}  from ${x.from.map((f) => `${f.fileName}${f.line ? `:${f.line}` : ''}`).join(', ') || '(no local file)'}  in ${where(x)} at ${x.locator}`);
+for (const x of r.canaries.sightings) console.log(`  seen      ${x.token}  from ${x.from.map((f) => `${f.fileName}${f.line ? `:${f.line}` : ''}`).join(', ') || '(no local file)'}  in ${where(x)} at ${x.locator}${x.count > 1 ? `  (${x.count}×)` : ''}`);
 for (const x of r.canaries.notSeen) console.log(`  not seen  ${x.token}  from ${x.from.map((f) => `${f.fileName}${f.line ? `:${f.line}` : ''}`).join(', ')}`);
 if (!r.canaries.sightings.length && !r.canaries.notSeen.length) console.log('  none planted');
 console.log('\nNOT SEARCHED');

@@ -178,6 +178,11 @@ function flow(id, { req = '', res = '', reqHeaders = [], resHeaders = [], trunca
   check(r.sightings.some((x) => x.token === 'WSCANARY-png-c3' && x.flowId === 72 && x.transforms.includes('base64')), 'canary inside a base64 image is found');
   check(r.notSeen.length === 1 && r.notSeen[0].token === 'WSCANARY-env-a1', 'files whose canary never appeared are listed');
   check(r.unknown.length === 1 && r.unknown[0] === 'WSCANARY-stray-zz', 'tokens seen in traffic but in no registered file are listed');
+
+  // a tool result wrapped as JSON inside a JSON string, holding the token twice (cat + grep of the same file)
+  const wrapped = JSON.stringify({ output: JSON.stringify({ output: '// WSCANARY-config-b2\nsrc/config.ts:2:// WSCANARY-config-b2' }) });
+  const w = P.findCanaries(files, (await P.archiveViews({ flows: [flow(73, { req: wrapped })] })).views).sightings.filter((x) => x.token === 'WSCANARY-config-b2');
+  check(w.length === 1 && w[0].locator === '$.output ▸ $.output' && w[0].count === 2, 'canary in a re-parsed string: one row at the innermost view, with how many times it is there');
 }
 
 // --- line helpers ---------------------------------------------------------------------

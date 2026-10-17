@@ -604,9 +604,25 @@
         seen.add(token);
       }
     }
-    // collapse the same token found in the raw body and in a decoded view of the same body
-    const derived = new Set(sightings.filter((x) => x.locator !== 'body').map((x) => `${x.token}/${x.flowId}/${x.side}`));
-    const unique = sightings.filter((x) => x.locator !== 'body' || !derived.has(`${x.token}/${x.flowId}/${x.side}`));
+    // The same occurrence is visible in several views of one body: the raw body, a JSON string, that string parsed
+    // again (`… ▸ $.output`), a joined stream. Keep the most specific view, and one row per view with a count
+    // (a tool result can legitimately hold the token twice, e.g. `cat` and `grep` output of the same file).
+    const body = (x) => `${x.token}/${x.flowId}/${x.side}`;
+    const decoded = new Set(sightings.filter((x) => x.locator !== 'body').map(body));
+    const unjoined = new Set(sightings.filter((x) => x.locator !== 'body' && !x.transforms.includes('join')).map(body));
+    const locators = new Map();
+    for (const x of sightings) { if (!locators.has(body(x))) locators.set(body(x), new Set()); locators.get(body(x)).add(x.locator); }
+    const rows = new Map();
+    for (const x of sightings) {
+      const k = body(x);
+      if (x.locator === 'body' && decoded.has(k)) continue;
+      if (x.transforms.includes('join') && unjoined.has(k)) continue;
+      if ([...locators.get(k)].some((l) => l.startsWith(`${x.locator} ▸ `))) continue;
+      const row = `${k}/${x.locator}`;
+      if (rows.has(row)) rows.get(row).count++;
+      else rows.set(row, { ...x, count: 1 });
+    }
+    const unique = [...rows.values()];
     const notSeen = [...origin].filter(([token]) => !seen.has(token)).map(([token, from]) => ({ token, from }));
     const unknown = [...new Set(unique.filter((x) => !x.from.length).map((x) => x.token))];
     return { sightings: unique, notSeen, unknown };
