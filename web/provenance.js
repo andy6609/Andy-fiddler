@@ -555,8 +555,14 @@
       }
       if (hits.length >= limit) { truncated = true; break; }
     }
-    const derived = new Set(hits.filter((h) => h.locator !== 'body').map((h) => `${h.flowId}/${h.side}`));
-    return { hits: hits.filter((h) => h.locator !== 'body' || !derived.has(`${h.flowId}/${h.side}`)), truncated };
+    // the same rules as for canaries: drop the raw body, a joined stream and an outer string when a more specific view
+    // of the same body also has the text (offsets differ between views, so rows are not merged further)
+    const body = (h) => `${h.flowId}/${h.side}`;
+    const decoded = new Set(hits.filter((h) => h.locator !== 'body').map(body));
+    const unjoined = new Set(hits.filter((h) => h.locator !== 'body' && !h.transforms.includes('join')).map(body));
+    const nested = new Set(hits.filter((h) => h.locator.includes(' ▸ ')).map((h) => `${body(h)}/${h.locator.slice(0, h.locator.lastIndexOf(' ▸ '))}`));
+    const keep = (h) => !(h.locator === 'body' && decoded.has(body(h))) && !(h.transforms.includes('join') && unjoined.has(body(h))) && !nested.has(`${body(h)}/${h.locator}`);
+    return { hits: hits.filter(keep), truncated };
   }
 
   // Up to 60 characters of context on each side; binary views show bytes as hex around the match.

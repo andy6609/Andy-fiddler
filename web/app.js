@@ -547,7 +547,7 @@
         html.push(`<button class="side-item ${active ? 'active' : ''}" data-action="category" data-view="${view}" data-cat="${id}">${icon(ic)}<span>${esc(label)}</span><span>${count}</span></button>`);
       }
     }
-    const traceCount = (S.trace.analysis?.matches.length ?? '') === '' ? '' : S.trace.analysis.matches.length + S.trace.analysis.canaries.sightings.length;
+    const traceCount = (S.trace.analysis?.matches.length ?? '') === '' ? '' : S.trace.analysis.matches.length + S.trace.analysis.canaries.sightings.length + (S.trace.analysis.names || []).length;
     html.push('<div class="side-heading"><span title="Search inside bodies, and trace registered local files into requests">TRACE</span></div>');
     html.push(`<button class="side-item ${S.view === 'find' ? 'active' : ''}" data-action="category" data-view="find" data-cat="all">${icon('list')}<span>Find in bodies</span><span>${S.trace.hits ? S.trace.hits.length : ''}</span></button>`);
     html.push(`<button class="side-item ${S.view === 'trace' ? 'active' : ''}" data-action="category" data-view="trace" data-cat="all">${icon('layers')}<span>Local files → requests</span><span>${traceCount}</span></button>`);
@@ -1641,6 +1641,7 @@
   }
 
   const traceMatches = () => (S.trace.analysis?.matches || []).filter((m) => S.trace.fileFilter === null || m.fileId === S.trace.fileFilter);
+  const traceNames = () => (S.trace.analysis?.names || []).filter((n) => S.trace.fileFilter === null || n.fileId === S.trace.fileFilter);
   const fileRange = (m) => (m.kind === 'bytes' ? `${m.whole ? 'whole file' : 'first ' + fmtBytes(m.bytes)}` : m.fileFrom === m.fileTo ? `line ${m.fileFrom}` : `lines ${m.fileFrom}–${m.fileTo}`);
   const rangeText = (c) => (c.binary ? (c.matchedBytes ? `bytes 0–${c.matchedBytes}` : '—') : c.ranges.map(([a, b]) => (a === b ? `${a}` : `${a}–${b}`)).join(', ') || '—');
 
@@ -1662,11 +1663,13 @@
       const reqs = [...new Set(a.matches.filter((m) => m.fileId === c.fileId).map((m) => m.flowId))];
       const k = perFile(c.fileId);
       const share = c.binary ? (c.matchedBytes ? `${Math.round(c.ratio * 100)}% of bytes` : 'not seen') : `${c.matchedAnchors} / ${c.anchorLines} lines`;
+      const named = [...new Set((a.names || []).filter((n) => n.fileId === c.fileId).map((n) => n.flowId))];
       return `<tr class="${S.trace.fileFilter === c.fileId ? 'selected' : ''}" data-action="trace-file" data-id="${c.fileId}">
         <td class="small" title="${esc(c.fileName)}">${esc(c.fileName)}</td><td class="mono small">${esc(share)}</td>
         <td class="mono small">${esc(rangeText(c))}</td>
         <td class="mono small">${k.tokens ? `${k.tokens} seen` : ''}${k.missing ? `${k.tokens ? ', ' : ''}${k.missing} not seen` : ''}${!k.tokens && !k.missing ? '—' : ''}</td>
-        <td class="mono small">${reqs.length ? reqs.map((id) => `#${id}`).join(' ') : '—'}</td></tr>`;
+        <td class="mono small">${reqs.length ? reqs.map((id) => `#${id}`).join(' ') : '—'}</td>
+        <td class="mono small">${named.length ? named.map((id) => `#${id}`).join(' ') : '—'}</td></tr>`;
     }).join('');
     const matches = traceMatches();
     const matchRows = matches.map((m, i) => `<tr data-action="trace-match" data-i="${i}" class="${S.selected?.kind === 'match' && S.selected.id === i ? 'selected' : ''}">
@@ -1676,14 +1679,18 @@
     const canaryRows = [
       ...canaries.sightings.map((x, i) => `<tr data-action="trace-canary" data-i="${i}" class="${S.selected?.kind === 'canary' && S.selected.id === i ? 'selected' : ''}">
         <td class="mono small">${esc(x.token)}</td><td class="small">${x.from.length ? x.from.map((f) => esc(`${f.fileName}${f.line ? `:${f.line}` : ''}`)).join(', ') : '<span class="badge warn">not in any local file</span>'}</td>
-        <td class="mono small">#${x.flowId} ${sideLabel(x.side)}</td><td class="mono small" title="${esc(x.locator)}">${esc(x.locator)}</td></tr>`),
+        <td class="mono small">#${x.flowId} ${sideLabel(x.side)}</td><td class="mono small" title="${esc(x.locator)}">${esc(x.locator)}${x.count > 1 ? ` <span class="muted">(${x.count}×)</span>` : ''}</td></tr>`),
       ...canaries.notSeen.map((x) => `<tr><td class="mono small">${esc(x.token)}</td><td class="small">${x.from.map((f) => esc(`${f.fileName}${f.line ? `:${f.line}` : ''}`)).join(', ')}</td>
         <td class="small muted" colspan="2">not seen in any captured body</td></tr>`),
     ].join('');
+    const nameRows = traceNames().map((n, i) => `<tr data-action="trace-name" data-i="${i}" class="${S.selected?.kind === 'name' && S.selected.id === i ? 'selected' : ''}">
+      <td class="mono small" title="${esc(n.fileName)}">${esc(n.name)}${n.form === 'name' ? ` <span class="muted">(name of ${esc(n.fileName)})</span>` : ''}</td>
+      <td class="mono small">#${n.flowId}</td><td class="mono small" title="${esc(n.locator)}">${esc(n.locator)}${n.count > 1 ? ` <span class="muted">(${n.count}×)</span>` : ''}</td>
+      <td class="mono small">${excerptHtml({ ...n.excerpt, before: n.excerpt.before.slice(-30), after: n.excerpt.after.slice(0, 30) })}</td></tr>`).join('');
     return `
       <div class="trace-section"><div class="section-title"><span>Coverage per file</span><span class="muted">meaningful lines (not blank, not just brackets) that appeared in a run</span></div>
-        <table class="traffic"><colgroup><col style="width:30%"><col style="width:120px"><col><col style="width:110px"><col style="width:120px"></colgroup>
-        <thead><tr><th>File</th><th>Seen</th><th>Ranges</th><th>Canaries</th><th>Requests</th></tr></thead><tbody>${coverageRows}</tbody></table></div>
+        <table class="traffic"><colgroup><col style="width:24%"><col style="width:106px"><col><col style="width:84px"><col style="width:68px"><col style="width:68px"></colgroup>
+        <thead><tr><th>File</th><th>Seen</th><th>Ranges</th><th>Canaries</th><th>Lines in</th><th>Name in</th></tr></thead><tbody>${coverageRows}</tbody></table></div>
       <div class="trace-section"><div class="section-title"><span>Matches${S.trace.fileFilter !== null ? ' for the selected file' : ''}</span><span class="muted">${matches.length}</span></div>
         ${matches.length ? `<table class="traffic"><colgroup><col style="width:22%"><col style="width:96px"><col style="width:58px"><col style="width:88px"><col><col style="width:150px"></colgroup>
         <thead><tr><th>File</th><th>Part</th><th>Request</th><th>Side</th><th>Where</th><th>How</th></tr></thead><tbody>${matchRows}</tbody></table>`
@@ -1691,12 +1698,16 @@
       ${canaryRows ? `<div class="trace-section"><div class="section-title"><span>Canary tokens</span><span class="muted">WSCANARY-… markers planted in files</span></div>
         <table class="traffic"><colgroup><col style="width:190px"><col style="width:26%"><col style="width:150px"><col></colgroup>
         <thead><tr><th>Token</th><th>From</th><th>Seen in</th><th>Where</th></tr></thead><tbody>${canaryRows}</tbody></table></div>` : ''}
+      ${nameRows ? `<div class="trace-section"><div class="section-title"><span>File names in requests</span><span class="muted">the path or name of a registered file, not its contents (an ls listing, a prompt, a tool argument)</span></div>
+        <table class="traffic"><colgroup><col style="width:22%"><col style="width:110px"><col style="width:30%"><col></colgroup>
+        <thead><tr><th>Name</th><th>Request</th><th>Where</th><th>Context</th></tr></thead><tbody>${nameRows}</tbody></table></div>` : ''}
       ${limitsNotice()}`;
   }
 
   function traceList(kind = S.view === 'find' ? 'hit' : 'match') {
     if (kind === 'hit') return S.trace.hits || [];
     if (kind === 'canary') return S.trace.analysis?.canaries.sightings || [];
+    if (kind === 'name') return traceNames();
     return traceMatches();
   }
 
@@ -1721,6 +1732,7 @@
   function traceInspector(sel, item) {
     if (sel.kind === 'hit') return hitInspector(item);
     if (sel.kind === 'canary') return canaryInspector(item);
+    if (sel.kind === 'name') return nameInspector(item);
     return matchInspector(item);
   }
 
@@ -1729,6 +1741,7 @@
     gzip: 'Content-Encoding gzip undone', deflate: 'Content-Encoding deflate undone', json: 'a JSON string value, unescaped',
     sse: 'one server-sent event', join: 'the same field joined across events in order', base64: 'base64 decoded',
     multipart: 'one multipart/form-data part', form: 'a urlencoded form field, percent-decoded', 'line-numbers': 'line-number prefixes removed (tool output)',
+    websocket: 'one WebSocket message (frames joined, client mask removed)', 'permessage-deflate': 'WebSocket permessage-deflate undone (window shared across messages)',
   };
   const transformList = (t) => (t.length ? t.map((x) => `<li><span class="badge">${esc(x)}</span> ${esc(TRANSFORM_TEXT[x] || '')}</li>`).join('') : '<li>bytes as captured, nothing undone</li>');
   const findView = (m) => (S.trace.analysis?.views || []).find((v) => v.flowId === m.flowId && v.side === m.side && v.locator === m.locator);
@@ -1798,6 +1811,25 @@
         <div class="section" style="margin-top:14px"><div class="section-title">How it was read</div><ul class="trace-how">${transformList(x.transforms)}</ul></div>
         <div class="section"><div class="section-title">Context</div>${context}</div>
         ${inspectorButtons(x.flowId, x.side)}
+      </div>`;
+  }
+
+  function nameInspector(n) {
+    return `
+      <div class="inspector-header">
+        <div class="inspector-title"><strong class="mono">${esc(n.name)}</strong></div>
+        <div class="inspector-url">→ request #${n.flowId} · ${flowLabel(n.flowId)}</div>
+      </div>
+      <div class="inspector-content">
+        <dl class="kv">
+          <dt>file</dt><dd>${esc(n.fileName)} (${n.form === 'name' ? 'its base name' : 'its path'})</dd>
+          <dt>where</dt><dd>${esc(n.locator)}</dd>
+          <dt>times</dt><dd>${esc(n.count)} in that view</dd>
+        </dl>
+        <div class="section" style="margin-top:14px"><div class="section-title">How it was read</div><ul class="trace-how">${transformList(n.transforms)}</ul></div>
+        <div class="section"><div class="section-title">Context</div><pre class="code">${excerptHtml(n.excerpt)}</pre></div>
+        <p class="small muted">A name is not contents. A common name (README.md, .env) can also appear for reasons unrelated to this file; read the context.</p>
+        ${inspectorButtons(n.flowId, n.side)}
       </div>`;
   }
 
@@ -1985,6 +2017,7 @@
     'trace-hit': (el) => selectTrace('hit', Number(el.dataset.i)),
     'trace-match': (el) => selectTrace('match', Number(el.dataset.i)),
     'trace-canary': (el) => selectTrace('canary', Number(el.dataset.i)),
+    'trace-name': (el) => selectTrace('name', Number(el.dataset.i)),
     'trace-open-flow': (el) => {
       S.flowTab = el.dataset.side === 'response' ? 'response' : 'request';
       S.view = 'flows'; S.category = 'all'; S.connection = '';

@@ -496,6 +496,14 @@ const wsFlow = (id, req, res, extensions = 'permessage-deflate') => ({
   check(r.names.length === 1 && r.names[0].count === 1, 'analyze reports names');
 }
 
+// --- search keeps the most specific view ------------------------------------------
+{
+  const req = JSON.stringify({ output: JSON.stringify({ output: 'exit 0\nexport const timeoutMs = 15000;' }) });
+  const { views } = await P.archiveViews({ flows: [flow(330, { req })] });
+  const r = P.search(views, 'timeoutMs = 15000');
+  check(r.hits.length === 1 && r.hits[0].locator === '$.output ▸ $.output', 'search reports text inside a re-parsed string once, at the innermost view');
+}
+
 // --- end of sections ----------------------------------------------------------
 console.log(`${checks} checks, ${failures} failures`);
 process.exit(failures ? 1 : 0);
